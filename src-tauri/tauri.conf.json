@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CP",
+  "mainBinaryName": "cp",
+  "version": "0.0.1",
+  "identifier": "com.cp.engine",
+  "build": {
+    "beforeDevCommand": "npm run dev:frontend --silent",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build:frontend",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CP",
+        "width": 640,
+        "height": 350,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": true,
+        "decorations": true,
+        "shadow": true,
+        "center": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        "default"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
+

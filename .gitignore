@@ -1,0 +1,96 @@
+# ==============================================================================
+# CP (Copy/Paste Engine) — Production .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. AI Agent Offline Brain, Rules & Private Memory (PRESERVED IN VAULT)
+# ------------------------------------------------------------------------------
+.local/
+/.local/
+**/.local/**
+.vault_attempts
+test-vault-verification/
+vault/
+
+# ------------------------------------------------------------------------------
+# 2. Environment Files & Secret Credentials (PRESERVED IN ENCRYPTED VAULT)
+# ------------------------------------------------------------------------------
+.env
+.env.*
+.env.local
+*.env
+*.env.*
+*.local
+!.env.example
+
+# ------------------------------------------------------------------------------
+# 3. Tauri Private Signing Keys & Secrets (PRESERVED IN ENCRYPTED VAULT)
+# ------------------------------------------------------------------------------
+.tauri/
+**/.tauri/**
+*.key
+
+# ------------------------------------------------------------------------------
+# 4. Encrypted Vault Container (Tracked on GitHub for Instant Recovery)
+# ------------------------------------------------------------------------------
+*.enc
+!cp-vault.enc
+
+# ------------------------------------------------------------------------------
+# 5. Node & Frontend Build Artifacts
+# ------------------------------------------------------------------------------
+node_modules/
+dist/
+build/
+.output/
+.cache/
+.vite/
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+tsconfig.node.tsbuildinfo
+
+# ------------------------------------------------------------------------------
+# 6. Rust & Tauri Build Targets
+# ------------------------------------------------------------------------------
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+**/*.rs.bk
+Cargo.lock.orig
+
+# ------------------------------------------------------------------------------
+# 7. IDE & Editor Configurations
+# ------------------------------------------------------------------------------
+.idea/
+*.sublime-project
+*.sublime-workspace
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+*.swp
+*.bak
+
+# ------------------------------------------------------------------------------
+# 8. Operating System & File System Artifacts
+# ------------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ------------------------------------------------------------------------------
+# 9. Logs & Temporary Files
+# ------------------------------------------------------------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+staging/
+release/
