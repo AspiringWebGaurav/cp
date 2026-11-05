@@ -97,7 +97,7 @@ pub fn probe_system_info() -> SystemInfo {
         computer_name,
         status: "ON (intercepting)".to_string(),
         hardware: hardware_desc,
-        engine_version: "0.0.1".to_string(),
+        engine_version: crate::ota::resolve_current_version(),
         transfers_completed: stats.transfers_completed,
         volume_moved: format_bytes(stats.total_bytes_moved),
         speed_rating: speed_desc,
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn test_system_info_fresh_defaults() {
         let info = probe_system_info();
-        assert_eq!(info.engine_version, "0.0.1");
+        assert!(info.engine_version.starts_with("0.0."));
         assert_eq!(info.status, "ON (intercepting)");
         println!("Hardware: {}", info.hardware);
         println!("Speed Rating: {}", info.speed_rating);

@@ -1,11 +1,14 @@
-import { CheckCircle2, Zap } from 'lucide-react';
+import { CheckCircle2, Zap, ArrowUpCircle } from 'lucide-react';
 import type { SystemInfo } from '../types';
 
 interface StatusGridProps {
   systemInfo: SystemInfo;
+  hasUpdate?: boolean;
+  targetVersion?: string;
+  onOpenUpdate?: () => void;
 }
 
-export function StatusGrid({ systemInfo }: StatusGridProps) {
+export function StatusGrid({ systemInfo, hasUpdate, targetVersion, onOpenUpdate }: StatusGridProps) {
   return (
     <div className="grid grid-cols-2 gap-0 items-stretch px-2 sm:px-4 py-2">
       {/* Left Column (50% exact width) */}
@@ -38,7 +41,19 @@ export function StatusGrid({ systemInfo }: StatusGridProps) {
       <div className="space-y-2.5 pl-6 flex flex-col justify-center">
         <div className="flex items-center justify-between whitespace-nowrap">
           <span className="font-bold text-zinc-900">ENGINE Version:</span>
-          <span className="font-semibold text-zinc-800">{systemInfo.engineVersion}</span>
+          <div className="flex items-center gap-1.5">
+            <span className="font-semibold text-zinc-800">{systemInfo.engineVersion}</span>
+            {hasUpdate && (
+              <button
+                onClick={onOpenUpdate}
+                title="Click to install update"
+                className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
+              >
+                <ArrowUpCircle className="w-3 h-3 text-emerald-600" />
+                <span>v{targetVersion?.replace(/^v/, '')}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center justify-between whitespace-nowrap">
@@ -62,4 +77,3 @@ export function StatusGrid({ systemInfo }: StatusGridProps) {
     </div>
   );
 }
-

@@ -17,7 +17,8 @@ pub fn start_explorer_interceptor(app: AppHandle) {
         return;
     }
 
-    std::thread::spawn(|| unsafe {
+    // Run within supervised worker thread: auto-resurrects on any unexpected hook disruption
+    crate::resilience::spawn_supervised_worker("explorer_interceptor", || unsafe {
         let hook = SetWindowsHookExW(
             WH_KEYBOARD_LL,
             Some(low_level_keyboard_proc),
@@ -26,6 +27,7 @@ pub fn start_explorer_interceptor(app: AppHandle) {
         );
 
         if hook.is_null() {
+            eprintln!("[CP Interceptor] SetWindowsHookExW returned null, worker will retry in 1s");
             return;
         }
 
@@ -44,6 +46,26 @@ pub fn start_explorer_interceptor(_app: AppHandle) {}
 
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn low_level_keyboard_proc(
+    code: i32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::CallNextHookEx;
+
+    // Isolate hook execution with catch_unwind to guarantee that no panic can ever
+    // cross the Win32 FFI boundary or bring down the Windows system hook chain!
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        low_level_keyboard_proc_inner(code, wparam, lparam)
+    }));
+
+    match result {
+        Ok(ret) => ret,
+        Err(_) => CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam),
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn low_level_keyboard_proc_inner(
     code: i32,
     wparam: usize,
     lparam: isize,
@@ -98,4 +120,3 @@ unsafe extern "system" fn low_level_keyboard_proc(
 
     CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
 }
-

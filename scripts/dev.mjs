@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { spawn, execSync } from 'node:child_process';
 import process from 'node:process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // Suppress extraneous Node runtime deprecation notices across child processes
 process.env.NODE_NO_WARNINGS = '1';
@@ -14,6 +16,7 @@ console.log('  💽 Hardware:    NVMe SSD + SATA HDD (WDC SN730 + Seagate 1TB)')
 console.log('  ⚡ Speed Rating: PCIe 3.0 / 3.4 GB/s (4MB Aligned IOCP Streaming)');
 console.log('  📋 Clipboard:   Active Win32 CF_HDROP Explorer Interceptor');
 console.log('  🖥️ Dev Server:  http://127.0.0.1:1420 (Vite 6 + React 19)');
+console.log('  🔄 OTA Watchdog: Intelligent Auto-Restart Supervisor Active');
 console.log('  🛑 To Stop:     Press Ctrl+C to clean and terminate all workers');
 console.log('===============================================================\n');
 
@@ -27,11 +30,11 @@ try {
 } catch (e) {}
 
 let child = null;
-let isExiting = false;
+let isUserExiting = false;
 
 function cleanExit(signal = 'EXIT') {
-  if (isExiting) return;
-  isExiting = true;
+  if (isUserExiting && signal !== 'SIGINT' && signal !== 'SIGTERM' && signal !== 'EXIT') return;
+  isUserExiting = true;
 
   console.log(`\n🛑 Received ${signal}: Shutting down CP development environment...`);
 
@@ -91,30 +94,69 @@ function cleanExit(signal = 'EXIT') {
 }
 
 // Register exit signal hooks
-process.on('SIGINT', () => cleanExit('SIGINT'));
-process.on('SIGTERM', () => cleanExit('SIGTERM'));
-process.on('SIGHUP', () => cleanExit('SIGHUP'));
-process.on('exit', () => cleanExit('EXIT'));
-
-// 2. Launch Tauri Dev as a single command string to prevent DEP0190 Deprecation Warning
-const commandString = process.platform === 'win32' ? 'npx.cmd tauri dev' : 'npx tauri dev';
-
-child = spawn(commandString, {
-  stdio: 'inherit',
-  shell: true,
-  windowsHide: true,
-  env: {
-    ...process.env,
-    RUST_BACKTRACE: '1',
-    NODE_NO_WARNINGS: '1'
-  }
+process.on('SIGINT', () => {
+  isUserExiting = true;
+  cleanExit('SIGINT');
+});
+process.on('SIGTERM', () => {
+  isUserExiting = true;
+  cleanExit('SIGTERM');
+});
+process.on('SIGHUP', () => {
+  isUserExiting = true;
+  cleanExit('SIGHUP');
+});
+process.on('exit', () => {
+  cleanExit('EXIT');
 });
 
-child.on('close', (code) => {
-  cleanExit(`CLOSE_${code || 0}`);
-});
+function startDevProcess() {
+  const commandString = process.platform === 'win32' ? 'npx.cmd tauri dev' : 'npx tauri dev';
 
-child.on('error', (err) => {
-  console.error('❌ Failed to start Tauri process:', err);
-  cleanExit('ERROR');
-});
+  child = spawn(commandString, {
+    stdio: 'inherit',
+    shell: true,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      RUST_BACKTRACE: '1',
+      NODE_NO_WARNINGS: '1'
+    }
+  });
+
+  child.on('close', (code) => {
+    const tempDir = process.env.TEMP || path.join(process.env.USERPROFILE || '', 'AppData', 'Local', 'Temp');
+    const restartFlag = path.join(tempDir, 'com.cp.engine', 'update_restart.flag');
+
+    // If an update restart flag was created and the user did NOT hit Ctrl+C, auto-restart seamlessly!
+    if (!isUserExiting && fs.existsSync(restartFlag)) {
+      let targetVer = '0.0.2';
+      try {
+        targetVer = fs.readFileSync(restartFlag, 'utf8').trim() || targetVer;
+        fs.unlinkSync(restartFlag);
+      } catch (e) {}
+
+      console.log(`\n===============================================================`);
+      console.log(`  🔄 CP Self-Update Applied: v${targetVer} Ready!`);
+      console.log(`  🚀 Auto-restarting development supervisor with updated app...`);
+      console.log(`===============================================================\n`);
+
+      setTimeout(() => {
+        startDevProcess();
+      }, 800);
+      return;
+    }
+
+    if (!isUserExiting) {
+      cleanExit(`CLOSE_${code || 0}`);
+    }
+  });
+
+  child.on('error', (err) => {
+    console.error('❌ Failed to start Tauri process:', err);
+    cleanExit('ERROR');
+  });
+}
+
+// 2. Launch initial development process
+startDevProcess();

@@ -41,3 +41,22 @@ export interface TransferState {
   eta: string;
 }
 
+export interface ReleaseManifest {
+  version: string;
+  notes?: string;
+  pub_date?: string;
+  url?: string;
+  size?: number;
+  signature?: string;
+  platforms?: Record<string, { url?: string; signature?: string }>;
+}
+
+export interface UpdateDownloadProgress {
+  downloaded_bytes: number;
+  total_bytes: number;
+  percentage: number;
+  speed: string;
+  stage: 'downloading' | 'verifying' | 'staging' | 'ready';
+}
+
+

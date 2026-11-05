@@ -2,11 +2,34 @@ pub mod engine;
 pub mod hardware;
 pub mod ota;
 pub mod interceptor;
+pub mod autostart;
+pub mod resilience;
 
 use hardware::{probe_system_info, record_completed_transfer, reset_real_stats, SystemInfo};
 use engine::{run_benchmark, BenchmarkResult, inspect_clipboard_files, ClipboardFileInfo, copy_file_streaming};
 use ota::{check_latest_release, ReleaseManifest};
 use std::path::PathBuf;
+
+#[tauri::command]
+fn is_autostart_enabled() -> bool {
+    autostart::is_autostart_registered()
+}
+
+#[tauri::command]
+fn set_autostart_enabled(enabled: bool) -> Result<bool, String> {
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let dir = std::path::PathBuf::from(local_app_data).join("CP");
+        let _ = std::fs::create_dir_all(&dir);
+        let pref_file = dir.join("autostart_disabled.flag");
+        if enabled {
+            let _ = std::fs::remove_file(pref_file);
+        } else {
+            let _ = std::fs::write(pref_file, "1");
+        }
+    }
+    autostart::set_autostart_registered(enabled)?;
+    Ok(enabled)
+}
 
 #[tauri::command]
 fn get_system_info() -> SystemInfo {
@@ -135,8 +158,52 @@ fn hide_window(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn show_window(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
+#[tauri::command]
+fn get_app_version() -> String {
+    ota::resolve_current_version()
+}
+
+#[tauri::command]
 async fn check_update(current_version: String) -> Result<Option<ReleaseManifest>, String> {
     check_latest_release(&current_version).await
+}
+
+#[tauri::command]
+fn check_and_consume_pending_paste() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let arg_has_paste = args.iter().any(|a| a == "--auto-paste");
+    let file_has_paste = if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        let flag = std::path::PathBuf::from(local_app_data).join("CP").join("pending_paste.flag");
+        if flag.exists() {
+            let _ = std::fs::remove_file(flag);
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    arg_has_paste || file_has_paste
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app: tauri::AppHandle,
+    manifest: ReleaseManifest,
+    pending_paste: Option<bool>,
+) -> Result<String, String> {
+    let target_version = manifest.version.clone();
+    let staged_path = ota::download_and_stage_update(&app, &manifest).await?;
+    ota::apply_update_and_restart(app, staged_path, target_version, pending_paste.unwrap_or(false))?;
+    Ok("Update staging complete. Restarting...".to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -197,6 +264,43 @@ pub fn run() {
                     }
                 }
 
+                // Show landing page upon fresh release install, or if --show, --restarted, or --auto-paste flag passed
+                {
+                    let args: Vec<String> = std::env::args().collect();
+                    let has_pending_paste = args.iter().any(|a| a == "--auto-paste") || {
+                        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                            std::path::PathBuf::from(local_app_data).join("CP").join("pending_paste.flag").exists()
+                        } else {
+                            false
+                        }
+                    };
+
+                    let force_show = has_pending_paste || args.iter().any(|a| {
+                        a == "--show" || a == "--restarted" || a == "--update-restart" || a == "--landing" || a == "--first-install"
+                    });
+
+                    let should_show = if force_show {
+                        true
+                    } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+                        let dir = std::path::PathBuf::from(local_app_data).join("CP");
+                        let _ = std::fs::create_dir_all(&dir);
+                        let flag_file = dir.join("first_install_shown.flag");
+                        if !flag_file.exists() {
+                            let _ = std::fs::write(&flag_file, "1");
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if should_show {
+                        let _ = main_win.show();
+                        let _ = main_win.set_focus();
+                    }
+                }
+
                 // Hide to system tray instead of destroying background driver when X is clicked
                 let win_clone = main_win.clone();
                 main_win.on_window_event(move |event| {
@@ -213,6 +317,12 @@ pub fn run() {
                 let status_i = MenuItem::with_id(app, "status", "● Status: ON (intercepting)", false, None::<&str>)?;
                 let sep1 = PredefinedMenuItem::separator(app)?;
                 let show_i = MenuItem::with_id(app, "show", "Open CP Console", true, None::<&str>)?;
+                let autostart_title = if autostart::is_autostart_registered() {
+                    "✓ Auto-Start with Windows"
+                } else {
+                    "Auto-Start with Windows"
+                };
+                let autostart_i = MenuItem::with_id(app, "autostart", autostart_title, true, None::<&str>)?;
                 let reset_i = MenuItem::with_id(app, "reset", "Reset Transfer Metrics", true, None::<&str>)?;
                 let sep2 = PredefinedMenuItem::separator(app)?;
                 let quit_i = MenuItem::with_id(app, "quit", "Quit CP", true, None::<&str>)?;
@@ -222,6 +332,7 @@ pub fn run() {
                     &status_i,
                     &sep1,
                     &show_i,
+                    &autostart_i,
                     &reset_i,
                     &sep2,
                     &quit_i,
@@ -242,6 +353,11 @@ pub fn run() {
                                     let _ = win.emit("show-console", ());
                                 }
                             }
+                            "autostart" => {
+                                let current = autostart::is_autostart_registered();
+                                let next_state = !current;
+                                let _ = set_autostart_enabled(next_state);
+                            }
                             "reset" => {
                                 reset_real_stats();
                                 if let Some(win) = app.get_webview_window("main") {
@@ -250,6 +366,7 @@ pub fn run() {
                                 }
                             }
                             "quit" => {
+                                resilience::authorize_explicit_exit();
                                 app.exit(0);
                             }
                             _ => {}
@@ -299,6 +416,7 @@ pub fn run() {
                                 failed_checks += 1;
                                 // If Vite is unreachable for 2 consecutive checks, development terminal has ended!
                                 if failed_checks >= 2 {
+                                    resilience::authorize_explicit_exit();
                                     std::process::exit(0);
                                 }
                             }
@@ -306,6 +424,10 @@ pub fn run() {
                     }
                 });
             }
+
+            // Synchronize autostart in Windows Registry (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
+            #[cfg(not(debug_assertions))]
+            autostart::sync_autostart_on_boot();
 
             Ok(())
         })
@@ -316,11 +438,36 @@ pub fn run() {
             pause_transfer,
             cancel_transfer,
             hide_window,
+            show_window,
             record_transfer,
             reset_stats,
             run_transfer_benchmark,
-            check_update
+            check_update,
+            get_app_version,
+            download_and_install_update,
+            check_and_consume_pending_paste,
+            is_autostart_enabled,
+            set_autostart_enabled
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running CP desktop application");
+        .build(tauri::generate_context!())
+        .expect("error while building CP desktop application")
+        .run(|_app, event| {
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    // In release mode: Do not let random events or window destruction kill the background service!
+                    // Only exit if user clicked "Quit CP" in tray (which sets authorize_explicit_exit)
+                    #[cfg(not(debug_assertions))]
+                    {
+                        if !resilience::is_exit_authorized() {
+                            api.prevent_exit();
+                        }
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        let _ = api;
+                    }
+                }
+                _ => {}
+            }
+        });
 }

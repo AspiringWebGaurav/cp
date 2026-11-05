@@ -8,6 +8,9 @@
 .local/
 /.local/
 **/.local/**
+AGENTS.md
+GEMINI.md
+.agents/
 .vault_attempts
 test-vault-verification/
 vault/
@@ -57,6 +60,9 @@ src-tauri/target/
 src-tauri/gen/schemas/
 **/*.rs.bk
 Cargo.lock.orig
+*.exe
+*.msi
+cp-immutable-base/
 
 # ------------------------------------------------------------------------------
 # 7. IDE & Editor Configurations
@@ -94,3 +100,4 @@ yarn-error.log*
 pnpm-debug.log*
 staging/
 release/
+scratch/
