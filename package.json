@@ -6,42 +6,35 @@
   "description": "CP (Copy/Paste) — High-Performance Windows Copy/Paste Replacement Engine",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
-    "kill:dev": "node scripts/predev.mjs",
-    "dev:frontend": "vite",
+    "dev": "vite",
+    "dev:engine": "tauri dev",
     "build": "tauri build",
     "build:frontend": "tsc && vite build",
     "preview": "vite preview",
     "test": "cargo test --offline --manifest-path src-tauri/Cargo.toml",
-    "test:update": "node scripts/test-update-lifecycle-local.mjs",
-    "reset:test": "node scripts/reset-test.mjs",
-    "tauri": "tauri",
-    "ship": "node scripts/ship.mjs",
-    "vault:pack": "node scripts/vault.mjs pack",
-    "vault:unpack": "node scripts/vault.mjs unpack",
-    "vault:status": "node scripts/vault.mjs status",
-    "rea": "rea-agents",
-    "rea:doctor": "rea-agents mcp doctor"
+    "tauri": "tauri"
   },
   "dependencies": {
-    "@tailwindcss/vite": "^4.0.9",
-    "@tauri-apps/api": "^2.2.0",
-    "@tauri-apps/plugin-opener": "^2.2.5",
+    "@tailwindcss/vite": "^4.3.4",
+    "@tauri-apps/api": "^2.12.4",
+    "@tauri-apps/plugin-opener": "^2.7.2",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.16.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "tailwind-merge": "^3.0.2",
-    "tailwindcss": "^4.0.9"
+    "lucide-react": "^1.69.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0",
+    "tailwindcss": "^4.3.4"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.2.4",
-    "@types/node": "^26.6.5",
-    "@types/react": "^19.0.10",
-    "@types/react-dom": "^19.0.4",
-    "@vitejs/plugin-react": "^4.3.4",
-    "rea-agents": "^6.8.0",
-    "typescript": "^5.7.3",
-    "vite": "^6.2.0"
+    "@tauri-apps/cli": "^2.12.4",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.2.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.6"
+  },
+  "allowScripts": {
+    "esbuild": true
   }
 }
