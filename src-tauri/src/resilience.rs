@@ -22,25 +22,24 @@ pub fn acquire_single_instance() -> bool {
     let args: Vec<String> = std::env::args().collect();
     let is_restarted = args.iter().any(|a| a == "--restarted" || a == "--update-restart");
 
-    let mutex_name: Vec<u16> = "Global\\CP_Engine_SingleInstance_Mutex\0"
+    let mutex_name: Vec<u16> = "CP_Engine_SingleInstance_Mutex\0"
         .encode_utf16()
         .collect();
 
     unsafe {
-        let mut handle = CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr());
+        let handle = CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr());
+        if handle.is_null() {
+            return true; // Fallback: allow startup if mutex creation failed
+        }
         if GetLastError() == ERROR_ALREADY_EXISTS {
             if is_restarted {
-                // Wait up to 3000ms for parent process to fully exit and release the kernel mutex
-                for _ in 0..60 {
-                    if !handle.is_null() {
-                        CloseHandle(handle);
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    handle = CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr());
-                    if GetLastError() != ERROR_ALREADY_EXISTS {
-                        INSTANCE_MUTEX = handle;
-                        return true; // Successfully acquired! Proceed with startup.
-                    }
+                use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0};
+                use windows_sys::Win32::System::Threading::WaitForSingleObject;
+                // Kernel wait for parent process to exit and release ownership (up to 10 seconds)
+                let wait_res = WaitForSingleObject(handle, 10000);
+                if wait_res == WAIT_OBJECT_0 || wait_res == WAIT_ABANDONED {
+                    INSTANCE_MUTEX = handle;
+                    return true; // Successfully acquired! Proceed with startup.
                 }
             }
 
@@ -94,12 +93,7 @@ pub fn register_windows_kernel_restart() {
         let cmd_line: Vec<u16> = "--autostart\0".encode_utf16().collect();
         unsafe {
             // Flags = 0: Restart on crash, hang, and abnormal termination
-            let res = RegisterApplicationRestart(cmd_line.as_ptr(), 0);
-            if res == 0 {
-                eprintln!("[CP Resilience] Windows WER application restart registered successfully (ExitCode 0x0)");
-            } else {
-                eprintln!("[CP Resilience] RegisterApplicationRestart returned status: 0x{:X}", res);
-            }
+            let _ = RegisterApplicationRestart(cmd_line.as_ptr(), 0);
         }
     }
 }
@@ -192,13 +186,16 @@ where
                     w();
                 }));
 
+                use std::io::Write;
                 if let Err(err) = result {
-                    eprintln!(
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "[CP Supervisor] Worker '{}' caught unexpected panic ({:?}). Reviving worker in 1s...",
                         name, err
                     );
                 } else {
-                    eprintln!(
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "[CP Supervisor] Worker '{}' exited. Reviving worker in 1s...",
                         name
                     );

@@ -5,6 +5,113 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::sync_channel;
 
+#[cfg(target_os = "windows")]
+use windows::core::Interface;
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::Shell::{IShellWindows, ShellWindows, IWebBrowser2};
+
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Variant::{VARIANT, VT_I4};
+
+#[cfg(target_os = "windows")]
+pub static LAST_EXPLORER_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+pub fn set_last_explorer_hwnd(hwnd: isize) {
+    LAST_EXPLORER_HWND.store(hwnd, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "windows")]
+pub fn query_active_explorer_path(target_hwnd: isize) -> Option<String> {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
+        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER);
+        let shell_windows = match shell_windows {
+            Ok(sw) => sw,
+            Err(_) => {
+                CoUninitialize();
+                return None;
+            }
+        };
+
+        let count = match shell_windows.Count() {
+            Ok(c) => c,
+            Err(_) => {
+                CoUninitialize();
+                return None;
+            }
+        };
+
+        let mut fallback_path: Option<String> = None;
+
+        for i in 0..count {
+            let mut variant_idx: VARIANT = std::mem::zeroed();
+            (*variant_idx.Anonymous.Anonymous).vt = VT_I4;
+            (*variant_idx.Anonymous.Anonymous).Anonymous.lVal = i;
+
+            if let Ok(dispatch) = shell_windows.Item(&variant_idx) {
+                if let Ok(browser) = dispatch.cast::<IWebBrowser2>() {
+                    let win_hwnd = browser.HWND().unwrap_or(windows::Win32::Foundation::SHANDLE_PTR(0));
+                    let hwnd_val = win_hwnd.0 as isize;
+
+                    if let Ok(bstr_url) = browser.LocationURL() {
+                        let url_str = bstr_url.to_string();
+                        if url_str.starts_with("file:///") {
+                            let raw_path = url_str.trim_start_matches("file:///");
+                            // Decode percent-encoded characters like %20 -> space
+                            let decoded = percent_decode_path(raw_path);
+                            let normalized = decoded.replace('/', "\\");
+                            let p = PathBuf::from(&normalized);
+                            if p.exists() {
+                                if target_hwnd != 0 {
+                                    use windows_sys::Win32::UI::WindowsAndMessaging::GetAncestor;
+                                    const GA_ROOT: u32 = 2;
+                                    let target_root = GetAncestor(target_hwnd as _, GA_ROOT) as isize;
+                                    let item_root = GetAncestor(hwnd_val as _, GA_ROOT) as isize;
+
+                                    if hwnd_val == target_hwnd
+                                        || (target_root != 0 && (target_root == hwnd_val || target_root == item_root))
+                                    {
+                                        CoUninitialize();
+                                        return Some(normalized);
+                                    }
+                                }
+                                if fallback_path.is_none() {
+                                    fallback_path = Some(normalized);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        CoUninitialize();
+        fallback_path
+    }
+}
+
+fn percent_decode_path(s: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i+1..i+3], 16) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkResult {
     pub bytes_copied: u64,
@@ -43,7 +150,20 @@ use std::sync::Mutex;
 
 pub static TRANSFER_CANCEL: AtomicBool = AtomicBool::new(false);
 pub static TRANSFER_PAUSED: AtomicBool = AtomicBool::new(false);
+pub static IS_TRANSFER_RUNNING: AtomicBool = AtomicBool::new(false);
 static CURRENT_DEST_FILE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn is_transfer_running() -> bool {
+    IS_TRANSFER_RUNNING.load(Ordering::SeqCst)
+}
+
+pub fn try_acquire_transfer() -> bool {
+    IS_TRANSFER_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
+
+pub fn release_transfer() {
+    IS_TRANSFER_RUNNING.store(false, Ordering::SeqCst);
+}
 
 pub fn set_current_dest_file(path: Option<PathBuf>) {
     if let Ok(mut lock) = CURRENT_DEST_FILE.lock() {
@@ -51,9 +171,38 @@ pub fn set_current_dest_file(path: Option<PathBuf>) {
     }
 }
 
+/// Robust multi-attempt file or directory deletion with read-only attribute clearing and Explorer notification
+pub fn robust_delete_path(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+
+    if path.is_dir() {
+        for i in 0..8 {
+            if fs::remove_dir_all(path).is_ok() || !path.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(40 * (i + 1)));
+        }
+    } else {
+        robust_delete_file(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ALLEVENTS, SHCNF_FLUSH};
+        SHChangeNotify(SHCNE_ALLEVENTS as i32, SHCNF_FLUSH, std::ptr::null(), std::ptr::null());
+    }
+}
+
 /// Robust multi-attempt file deletion with read-only attribute clearing and Explorer notification
 pub fn robust_delete_file(path: &Path) {
     if !path.exists() {
+        return;
+    }
+
+    if path.is_dir() {
+        robust_delete_path(path);
         return;
     }
 
@@ -85,10 +234,10 @@ pub fn cancel_current_transfer() {
     TRANSFER_CANCEL.store(true, Ordering::SeqCst);
     TRANSFER_PAUSED.store(false, Ordering::SeqCst);
 
-    // Robust independent fallback: immediately locate and delete destination file
+    // Robust independent fallback: immediately locate and delete destination file or folder
     if let Ok(lock) = CURRENT_DEST_FILE.lock() {
         if let Some(ref dest_path) = *lock {
-            robust_delete_file(dest_path);
+            robust_delete_path(dest_path);
         }
     }
 }
@@ -229,47 +378,58 @@ pub fn inspect_clipboard_files() -> Option<ClipboardFileInfo> {
 pub fn get_active_explorer_directory() -> Option<String> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetClassNameW, GetWindowTextW};
 
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if !hwnd.is_null() {
+    let target_hwnd = LAST_EXPLORER_HWND.load(Ordering::SeqCst);
+    let hwnd = if target_hwnd != 0 {
+        target_hwnd as windows_sys::Win32::Foundation::HWND
+    } else {
+        unsafe { GetForegroundWindow() }
+    };
+
+    if !hwnd.is_null() {
+        unsafe {
             let mut class_buf = [0u16; 256];
             let class_len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
             let class_name = String::from_utf16_lossy(&class_buf[..class_len.max(0) as usize]);
 
+            // If user was on the Desktop (Progman or WorkerW)
+            if class_name == "Progman" || class_name == "WorkerW" {
+                if let Ok(user_profile) = std::env::var("USERPROFILE") {
+                    let p = PathBuf::from(user_profile).join("Desktop");
+                    if p.exists() {
+                        return Some(p.to_string_lossy().to_string());
+                    }
+                }
+            }
+
+            // Query IShellWindows with the target Explorer HWND (supports Windows 10 & Windows 11 tabs)
+            if let Some(path) = query_active_explorer_path(hwnd as isize) {
+                return Some(path);
+            }
+
+            // Fallback: Check title of window
             let mut title_buf = [0u16; 512];
             let title_len = GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32);
             let title = String::from_utf16_lossy(&title_buf[..title_len.max(0) as usize]);
 
-            // If active window is File Explorer (CabinetWClass)
-            if class_name == "CabinetWClass" || class_name == "ExploreWClass" {
-                // Match drive pattern e.g. "(D:)" or "(C:)"
-                for drive_letter in ['C', 'D', 'E', 'F', 'G'] {
-                    let pattern = format!("({}:)", drive_letter);
-                    if title.contains(&pattern) {
-                        let path_str = format!("{}:\\", drive_letter);
-                        if Path::new(&path_str).exists() {
-                            return Some(path_str);
-                        }
+            // Match drive pattern e.g. "(D:)" or "(C:)"
+            for drive_letter in ['C', 'D', 'E', 'F', 'G'] {
+                let pattern = format!("({}:)", drive_letter);
+                if title.contains(&pattern) {
+                    let path_str = format!("{}:\\", drive_letter);
+                    if Path::new(&path_str).exists() {
+                        return Some(path_str);
                     }
                 }
+            }
 
-                if title.contains("Downloads") {
-                    if let Ok(user_profile) = std::env::var("USERPROFILE") {
-                        let p = PathBuf::from(user_profile).join("Downloads");
-                        if p.exists() {
-                            return Some(p.to_string_lossy().to_string());
-                        }
-                    }
-                } else if title.contains("Desktop") {
-                    if let Ok(user_profile) = std::env::var("USERPROFILE") {
-                        let p = PathBuf::from(user_profile).join("Desktop");
-                        if p.exists() {
-                            return Some(p.to_string_lossy().to_string());
-                        }
+            if title.contains("Downloads") {
+                if let Ok(user_profile) = std::env::var("USERPROFILE") {
+                    let p = PathBuf::from(user_profile).join("Downloads");
+                    if p.exists() {
+                        return Some(p.to_string_lossy().to_string());
                     }
                 }
-            } else if class_name == "Progman" || class_name == "WorkerW" {
-                // Desktop is foreground
+            } else if title.contains("Desktop") {
                 if let Ok(user_profile) = std::env::var("USERPROFILE") {
                     let p = PathBuf::from(user_profile).join("Desktop");
                     if p.exists() {
@@ -278,6 +438,11 @@ pub fn get_active_explorer_directory() -> Option<String> {
                 }
             }
         }
+    }
+
+    // Secondary fallback: query any open Explorer window in IShellWindows
+    if let Some(path) = query_active_explorer_path(0) {
+        return Some(path);
     }
 
     // Default to secondary drive D:\ if it exists (user's New Volume D:), otherwise C:\
@@ -291,6 +456,51 @@ pub fn get_active_explorer_directory() -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 pub fn get_active_explorer_directory() -> Option<String> {
     None
+}
+
+/// Generates a non-conflicting, unique destination path following Windows Explorer conventions.
+/// If `dst_dir\file.ext` exists (such as when pasting within the same folder), it creates
+/// `dst_dir\file - Copy.ext`, `dst_dir\file - Copy (2).ext`, etc.
+pub fn generate_unique_destination_path(src: &Path, dst_dir: &Path) -> PathBuf {
+    let file_name = match src.file_name() {
+        Some(name) => name.to_string_lossy().to_string(),
+        None => return dst_dir.join("cp_item"),
+    };
+
+    let target_initial = dst_dir.join(&file_name);
+    // If destination does NOT exist, use it directly
+    if !target_initial.exists() {
+        return target_initial;
+    }
+
+    let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| file_name.clone());
+    let extension = src.extension().map(|e| e.to_string_lossy().to_string());
+
+    let candidate_1 = match &extension {
+        Some(ext) if !ext.is_empty() => format!("{} - Copy.{}", stem, ext),
+        _ => format!("{} - Copy", stem),
+    };
+    let path_1 = dst_dir.join(&candidate_1);
+    if !path_1.exists() {
+        return path_1;
+    }
+
+    let mut counter = 2;
+    loop {
+        let candidate_n = match &extension {
+            Some(ext) if !ext.is_empty() => format!("{} - Copy ({}).{}", stem, counter, ext),
+            _ => format!("{} - Copy ({})", stem, counter),
+        };
+        let path_n = dst_dir.join(&candidate_n);
+        if !path_n.exists() {
+            return path_n;
+        }
+        counter += 1;
+        if counter > 1000 {
+            let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+            return dst_dir.join(format!("{}_{}", file_name, ts));
+        }
+    }
 }
 
 /// High-Performance Asynchronous Pipelined Streaming File Copy Engine
@@ -386,6 +596,7 @@ where
 
     while let Ok(chunk) = receiver.recv() {
         if TRANSFER_CANCEL.load(Ordering::SeqCst) {
+            drop(receiver);
             drop(writer);
             let _ = reader_thread.join();
             robust_delete_file(dst);
@@ -398,6 +609,7 @@ where
             while TRANSFER_PAUSED.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(40));
                 if TRANSFER_CANCEL.load(Ordering::SeqCst) {
+                    drop(receiver);
                     drop(writer);
                     let _ = reader_thread.join();
                     robust_delete_file(dst);
@@ -418,6 +630,7 @@ where
         on_progress(bytes_copied, total_bytes, speed_gb_per_sec);
     }
 
+    drop(receiver);
     let _ = reader_thread.join();
 
     if TRANSFER_CANCEL.load(Ordering::SeqCst) {
@@ -428,6 +641,7 @@ where
     }
 
     writer.flush().map_err(|e| format!("Flush error: {}", e))?;
+    drop(writer);
     set_current_dest_file(None);
 
     // Refresh Windows Explorer view so the new file shows up immediately
@@ -438,6 +652,133 @@ where
     }
 
     Ok(bytes_copied)
+}
+
+/// Recursively calculates total byte size across all files in a file or directory path
+pub fn calculate_path_size(path: &Path) -> u64 {
+    if path.is_file() {
+        return fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    }
+    if path.is_dir() {
+        let mut total = 0u64;
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                total += calculate_path_size(&entry.path());
+            }
+        }
+        return total;
+    }
+    0
+}
+
+fn copy_dir_recursive<F>(
+    src: &Path,
+    dst: &Path,
+    total_bytes: u64,
+    cumulative_bytes: &mut u64,
+    start_time: Instant,
+    total_paused: &mut Duration,
+    on_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(u64, u64, f64),
+{
+    if TRANSFER_CANCEL.load(Ordering::SeqCst) {
+        robust_delete_path(dst);
+        return Err("Transfer canceled by user".to_string());
+    }
+
+    if !dst.exists() {
+        fs::create_dir_all(dst).map_err(|e| format!("Failed to create folder {}: {}", dst.display(), e))?;
+    }
+
+    let entries = fs::read_dir(src).map_err(|e| format!("Failed to read folder {}: {}", src.display(), e))?;
+
+    for entry in entries.flatten() {
+        if TRANSFER_CANCEL.load(Ordering::SeqCst) {
+            robust_delete_path(dst);
+            return Err("Transfer canceled by user".to_string());
+        }
+
+        let entry_path = entry.path();
+        let target_path = dst.join(entry.file_name());
+
+        if entry_path.is_dir() {
+            copy_dir_recursive(
+                &entry_path,
+                &target_path,
+                total_bytes,
+                cumulative_bytes,
+                start_time,
+                total_paused,
+                on_progress,
+            )?;
+        } else if entry_path.is_file() {
+            let file_bytes = copy_file_streaming(&entry_path, &target_path, |copied_file, _, _speed| {
+                let current_total_copied = *cumulative_bytes + copied_file;
+                let active_elapsed = start_time.elapsed().saturating_sub(*total_paused);
+                let active_sec = active_elapsed.as_secs_f64().max(0.001);
+                let speed_gb_per_sec = (current_total_copied as f64 / (1024.0 * 1024.0 * 1024.0)) / active_sec;
+                on_progress(current_total_copied, total_bytes, speed_gb_per_sec);
+            })?;
+            *cumulative_bytes += file_bytes;
+        }
+    }
+
+    Ok(())
+}
+
+/// Universal Pipelined Streaming Engine — seamlessly supports both single files and entire directory structures!
+pub fn copy_path_streaming<F>(
+    src: &Path,
+    dst: &Path,
+    mut on_progress: F,
+) -> Result<u64, String>
+where
+    F: FnMut(u64, u64, f64),
+{
+    if !src.exists() {
+        return Err(format!("Source path does not exist: {}", src.display()));
+    }
+
+    if src.is_file() {
+        return copy_file_streaming(src, dst, on_progress);
+    }
+
+    if src.is_dir() {
+        let total_bytes = calculate_path_size(src);
+        fs::create_dir_all(dst).map_err(|e| format!("Failed to create destination directory: {}", e))?;
+        set_current_dest_file(Some(dst.to_path_buf()));
+
+        TRANSFER_CANCEL.store(false, Ordering::SeqCst);
+        TRANSFER_PAUSED.store(false, Ordering::SeqCst);
+
+        let mut cumulative_bytes: u64 = 0;
+        let start_time = Instant::now();
+        let mut total_paused = Duration::ZERO;
+
+        copy_dir_recursive(
+            src,
+            dst,
+            total_bytes,
+            &mut cumulative_bytes,
+            start_time,
+            &mut total_paused,
+            &mut on_progress,
+        )?;
+
+        set_current_dest_file(None);
+
+        #[cfg(target_os = "windows")]
+        unsafe {
+            use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ALLEVENTS, SHCNF_FLUSH};
+            SHChangeNotify(SHCNE_ALLEVENTS as i32, SHCNF_FLUSH, std::ptr::null(), std::ptr::null());
+        }
+
+        return Ok(cumulative_bytes);
+    }
+
+    Err("Unknown source item type".to_string())
 }
 
 #[cfg(test)]

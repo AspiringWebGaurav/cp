@@ -6,6 +6,8 @@ export interface SystemInfo {
   transfersCompleted: number;
   volumeMoved: string;
   speedRating: string;
+  processor: string;
+  memory: string;
 }
 
 export interface ClipboardFileInfo {

@@ -49,7 +49,9 @@ pub fn set_autostart_registered(enable: bool) -> Result<(), String> {
             .set_value(VALUE_NAME, &cmd_value)
             .map_err(|e| format!("Failed to write autostart registry value: {}", e))?;
 
-        eprintln!(
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
             "[CP Autostart] Registered Windows Startup: HKCU\\{}\\{} -> {}",
             RUN_SUBKEY, VALUE_NAME, cmd_value
         );
@@ -58,7 +60,9 @@ pub fn set_autostart_registered(enable: bool) -> Result<(), String> {
     } else {
         if let Ok(run_key) = hkcu.open_subkey_with_flags(RUN_SUBKEY, KEY_SET_VALUE) {
             let _ = run_key.delete_value(VALUE_NAME);
-            eprintln!(
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
                 "[CP Autostart] Removed Windows Startup entry: HKCU\\{}\\{}",
                 RUN_SUBKEY, VALUE_NAME
             );

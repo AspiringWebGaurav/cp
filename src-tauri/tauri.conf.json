@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "CP",
-        "width": 640,
-        "height": 350,
+        "width": 590,
+        "height": 196,
         "resizable": false,
         "maximizable": false,
         "minimizable": false,
@@ -41,11 +41,15 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "perMachine",
+        "installMode": "currentUser",
         "languages": [
           "English"
         ],
-        "startMenuFolder": "CP"
+        "startMenuFolder": "CP",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/nsis-header.bmp",
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "installerHooks": "hooks.nsh"
       }
     },
     "icon": [

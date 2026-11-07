@@ -5,6 +5,10 @@ use tauri::{AppHandle, Emitter, Manager};
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+pub fn is_interceptor_active() -> bool {
+    HOOK_ACTIVE.load(Ordering::SeqCst)
+}
+
 #[cfg(target_os = "windows")]
 pub fn start_explorer_interceptor(app: AppHandle) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -27,7 +31,8 @@ pub fn start_explorer_interceptor(app: AppHandle) {
         );
 
         if hook.is_null() {
-            eprintln!("[CP Interceptor] SetWindowsHookExW returned null, worker will retry in 1s");
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "[CP Interceptor] SetWindowsHookExW returned null, worker will retry in 1s");
             return;
         }
 
@@ -99,7 +104,23 @@ unsafe fn low_level_keyboard_proc_inner(
                         // Check if clipboard contains file drop list: CF_HDROP (15)
                         const CF_HDROP: u32 = 15;
                         if IsClipboardFormatAvailable(CF_HDROP) != 0 {
+                            // Debounce keystroke autorepeat / duplicate triggers (minimum 1.2s between paste triggers)
+                            static LAST_INTERCEPT_TIME_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let last = LAST_INTERCEPT_TIME_MS.load(Ordering::SeqCst);
+                            if now.saturating_sub(last) < 1200 {
+                                return 1; // Debounce duplicate/repeat keystroke
+                            }
+                            LAST_INTERCEPT_TIME_MS.store(now, Ordering::SeqCst);
+
                             // SUPPRESS Windows Explorer's built-in paste!
+                            // Store the foreground Explorer HWND *before* showing the CP window
+                            // to guarantee accurate active directory lookup in IShellWindows!
+                            crate::engine::set_last_explorer_hwnd(hwnd as isize);
+
                             // Trigger CP's high-speed copy transfer immediately!
                             if let Some(app) = APP_HANDLE.get() {
                                 if let Some(win) = app.get_webview_window("main") {

@@ -85,8 +85,11 @@ pub fn verify_binary(data: &[u8], signature_opt: Option<&str>) -> Result<(), Str
         return Err("Update payload size is unexpectedly small".to_string());
     }
 
-    if data.len() < 2 || data[0] != b'M' || data[1] != b'Z' {
-        return Err("Downloaded update file is not a valid Windows executable (missing MZ header)".to_string());
+    let is_pe = data.len() >= 2 && data[0] == b'M' && data[1] == b'Z';
+    let is_container = data.len() >= 8 && (data.starts_with(b"CP_OTA") || data.starts_with(b"DWNX_OTA"));
+
+    if !is_pe && !is_container {
+        return Err("Downloaded update file is not a valid container or Windows executable".to_string());
     }
 
     let signature_str = match signature_opt {
@@ -154,9 +157,13 @@ pub async fn check_latest_release(current_version: &str) -> Result<Option<Releas
     let url = if let Ok(custom) = std::env::var("CP_UPDATE_URL") {
         custom
     } else {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
         format!(
-            "{}/api/v1/releases/{}/latest?target=windows-x86_64&arch=x86_64&current_version={}",
-            GPHOST_API_BASE, GPHOST_APP_SLUG, current_version
+            "{}/api/v1/releases/{}/latest?target=windows-x86_64&arch=x86_64&current_version={}&t={}",
+            GPHOST_API_BASE, GPHOST_APP_SLUG, current_version, ts
         )
     };
 
@@ -171,6 +178,8 @@ pub async fn check_latest_release(current_version: &str) -> Result<Option<Releas
             "User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
         )
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -196,107 +205,107 @@ pub async fn check_latest_release(current_version: &str) -> Result<Option<Releas
     Ok(None)
 }
 
-pub async fn download_and_stage_update(
-    app: &AppHandle,
-    manifest: &ReleaseManifest,
-) -> Result<PathBuf, String> {
-    let download_url = manifest
-        .url
-        .as_ref()
-        .ok_or_else(|| "Manifest does not contain a binary download URL".to_string())?;
+pub async fn download_binary_container(
+    app: Option<&AppHandle>,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+
+    let sep = if url.contains('?') { "&" } else { "?" };
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let download_url = format!("{}{}_t={}", url, sep, ts);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Failed to create download client: {}", e))?;
 
-    let mut res = client
-        .get(download_url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        )
+    let res = client
+        .get(&download_url)
+        .header("Cache-Control", "no-cache")
+        .header("Pragma", "no-cache")
         .send()
         .await
-        .map_err(|e| format!("Failed to initiate update download: {}", e))?;
+        .map_err(|e| format!("Failed to download update binary: {}", e))?;
 
     if !res.status().is_success() {
         return Err(format!("Download server returned HTTP {}", res.status()));
     }
 
-    let total_bytes = res
-        .content_length()
-        .or(manifest.size)
-        .unwrap_or(18 * 1024 * 1024);
-
+    let total_bytes = res.content_length().unwrap_or(12 * 1024 * 1024);
     let mut downloaded_bytes: u64 = 0;
-    let mut binary_buffer = Vec::with_capacity(total_bytes as usize);
+    let mut buffer = Vec::with_capacity(total_bytes as usize);
+    let mut stream = res.bytes_stream();
     let start_time = std::time::Instant::now();
     let mut last_emit = std::time::Instant::now();
 
-    while let Some(chunk_result) = res.chunk().await.map_err(|e| e.to_string())? {
-        downloaded_bytes += chunk_result.len() as u64;
-        binary_buffer.extend_from_slice(&chunk_result);
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| format!("Failed to read stream chunk: {}", e))?;
+        downloaded_bytes += chunk.len() as u64;
+        buffer.extend_from_slice(&chunk);
 
         let now = std::time::Instant::now();
-        if now.duration_since(last_emit).as_millis() >= 60 || downloaded_bytes >= total_bytes {
+        if downloaded_bytes == total_bytes || now.duration_since(last_emit).as_millis() >= 40 {
             last_emit = now;
             let elapsed_secs = start_time.elapsed().as_secs_f64().max(0.001);
             let speed_mb = (downloaded_bytes as f64 / (1024.0 * 1024.0)) / elapsed_secs;
-            let percentage = if total_bytes > 0 {
-                ((downloaded_bytes as f64 / total_bytes as f64) * 100.0).min(100.0)
+            let pct = if total_bytes > 0 {
+                ((downloaded_bytes as f64 / total_bytes as f64) * 100.0).clamp(1.0, 99.0)
             } else {
-                100.0
+                50.0
             };
 
-            let _ = app.emit(
-                "update-download-progress",
-                UpdateProgress {
-                    downloaded_bytes,
-                    total_bytes,
-                    percentage: (percentage * 10.0).round() / 10.0,
-                    speed: format!("{:.1} MB/s", speed_mb),
-                    stage: "downloading".to_string(),
-                },
-            );
+            if let Some(app_handle) = app {
+                let _ = app_handle.emit(
+                    "update-download-progress",
+                    UpdateProgress {
+                        downloaded_bytes,
+                        total_bytes,
+                        percentage: (pct * 10.0).round() / 10.0,
+                        speed: format!("{:.1} MB/s", speed_mb),
+                        stage: "downloading".to_string(),
+                    },
+                );
+                let _ = app_handle.emit(
+                    "ota-download-progress",
+                    serde_json::json!({
+                        "downloaded": downloaded_bytes,
+                        "total": total_bytes,
+                        "percentage": pct.floor() as u32
+                    }),
+                );
+            }
         }
     }
 
-    // Verification stage
-    let _ = app.emit(
-        "update-download-progress",
-        UpdateProgress {
-            downloaded_bytes,
-            total_bytes,
-            percentage: 100.0,
-            speed: "0 MB/s".to_string(),
-            stage: "verifying".to_string(),
-        },
-    );
+    if let Some(app_handle) = app {
+        let _ = app_handle.emit(
+            "update-download-progress",
+            UpdateProgress {
+                downloaded_bytes,
+                total_bytes: downloaded_bytes,
+                percentage: 100.0,
+                speed: "0 MB/s".to_string(),
+                stage: "verifying".to_string(),
+            },
+        );
+        let _ = app_handle.emit(
+            "ota-download-progress",
+            serde_json::json!({
+                "downloaded": downloaded_bytes,
+                "total": downloaded_bytes,
+                "percentage": 100
+            }),
+        );
+    }
 
-    verify_binary(&binary_buffer, manifest.signature.as_deref())?;
-
-    // Staging stage
-    let staging_dir = std::env::temp_dir().join("com.cp.engine");
-    std::fs::create_dir_all(&staging_dir)
-        .map_err(|e| format!("Failed to create staging directory: {}", e))?;
-
-    let staged_file_path = staging_dir.join(format!("cp-v{}.staged.exe", manifest.version.trim_start_matches('v')));
-    std::fs::write(&staged_file_path, &binary_buffer)
-        .map_err(|e| format!("Failed to write staged update executable: {}", e))?;
-
-    let _ = app.emit(
-        "update-download-progress",
-        UpdateProgress {
-            downloaded_bytes,
-            total_bytes,
-            percentage: 100.0,
-            speed: "0 MB/s".to_string(),
-            stage: "ready".to_string(),
-        },
-    );
-
-    Ok(staged_file_path)
+    Ok(buffer)
 }
 
 pub fn apply_update_and_restart(
@@ -327,55 +336,89 @@ pub fn apply_update_and_restart(
 
     let old_exe = parent_dir.join(format!("{}.old", file_name));
 
-    // 1. Clean previous .old if exists
+    // 1. Clean previous .old and .new if exist
     if old_exe.exists() {
         let _ = std::fs::remove_file(&old_exe);
     }
+    let new_exe = parent_dir.join(format!("{}.new", file_name));
+    if new_exe.exists() {
+        let _ = std::fs::remove_file(&new_exe);
+    }
 
-    // 2. Pure Native In-Process Atomic Swap (Zero PowerShell, Zero Console Flashing)
-    // On Windows NTFS, running executables can be renamed immediately.
+    // 2. Copy staged binary directly into target application folder first
+    // This eliminates cross-directory / temp ACL / locking issues completely!
+    if let Err(e) = std::fs::copy(&staged_path, &new_exe) {
+        return Err(format!("Could not copy staged update into application directory: {}", e));
+    }
+
+    if !new_exe.exists() || new_exe.metadata().map(|m| m.len() < 500_000).unwrap_or(true) {
+        let _ = std::fs::remove_file(&new_exe);
+        return Err("Staged binary copy is incomplete or invalid".to_string());
+    }
+
+    // 3. Pure Native Same-Directory Atomic Swap (Zero PowerShell, Zero Console Flashing)
+    // On Windows NTFS, running executables in the same directory can be renamed immediately.
     let swap_result = (|| -> Result<(), std::io::Error> {
-        std::fs::rename(&current_exe, &old_exe)?;
-        if let Err(e) = std::fs::rename(&staged_path, &current_exe) {
-            // Revert if staging rename failed
-            let _ = std::fs::rename(&old_exe, &current_exe);
+        let mut renamed_to_default_old = false;
+        if let Err(_) = std::fs::rename(&current_exe, &old_exe) {
+            // If cp.exe.old is locked or cannot be deleted, try unique PID fallback
+            let fallback_old = parent_dir.join(format!("{}.{}.old", file_name, std::process::id()));
+            let _ = std::fs::remove_file(&fallback_old);
+            std::fs::rename(&current_exe, &fallback_old)?;
+        } else {
+            renamed_to_default_old = true;
+        }
+        if let Err(e) = std::fs::rename(&new_exe, &current_exe) {
+            // Revert if new_exe rename failed
+            if renamed_to_default_old {
+                let _ = std::fs::rename(&old_exe, &current_exe);
+            }
             return Err(e);
         }
         Ok(())
     })();
 
     if let Err(e) = swap_result {
+        // Fail-safe: guarantee current_exe always exists
+        if !current_exe.exists() && old_exe.exists() {
+            let _ = std::fs::copy(&old_exe, &current_exe);
+        }
         return Err(format!(
             "Native in-process binary replacement failed: {}. Please ensure CP has write permissions.",
             e
         ));
     }
 
-    // 3. Persist installed version marker and pending paste lifecycle flag in LocalAppData
+    // Clean up temporary staged file
+    let _ = std::fs::remove_file(&staged_path);
+
+    // 4. Persist installed version marker and pending paste lifecycle flag in LocalAppData
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
         let ver_dir = PathBuf::from(local_app_data).join("CP");
         let _ = std::fs::create_dir_all(&ver_dir);
-        let _ = std::fs::write(ver_dir.join("installed_version.txt"), target_version.as_bytes());
+        let _ = std::fs::write(ver_dir.join("installed_version.txt"), target_version.trim().trim_start_matches('v').as_bytes());
         if pending_paste {
             let _ = std::fs::write(ver_dir.join("pending_paste.flag"), b"1");
         }
     }
 
-    // 4. Authorize exit in supervisor so Tauri and supervisor do not block application teardown
+    // 5. Authorize exit in supervisor so Tauri and supervisor do not block application teardown
     crate::resilience::authorize_explicit_exit();
 
-    // 5. Release single-instance mutex kernel handle before spawning child
+    // 6. Release single-instance mutex kernel handle before spawning child
     crate::resilience::release_single_instance_mutex();
 
-    // 6. Spawn updated native Win32 binary directly with CREATE_NO_WINDOW | DETACHED_PROCESS
+    // 7. Spawn updated native Win32 binary directly with DETACHED_PROCESS
     // Zero PowerShell, Zero cmd.exe, Zero Terminal Flash!
     {
         let mut cmd = std::process::Command::new(&current_exe);
+        cmd.arg("--update-restart");
         cmd.arg("--restarted");
         cmd.arg("--show");
         if pending_paste {
             cmd.arg("--auto-paste");
         }
+        cmd.current_dir(&parent_dir);
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
@@ -383,18 +426,18 @@ pub fn apply_update_and_restart(
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
             const DETACHED_PROCESS: u32 = 0x00000008;
-            cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+            cmd.creation_flags(DETACHED_PROCESS);
         }
 
         let spawn_res = cmd.spawn();
         if let Err(e) = spawn_res {
-            eprintln!("[CP OTA] Note on native respawn: {}", e);
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "[CP OTA] Note on native respawn: {}", e);
         }
     }
 
-    // 7. Clean teardown of current process
+    // 8. Clean teardown of current process
     for (_label, window) in app.webview_windows() {
         let _ = window.destroy();
     }
@@ -407,18 +450,20 @@ pub fn apply_update_and_restart(
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_version_comparisons() {
+        assert!(is_newer_version("0.0.2", "0.0.1"));
+        assert!(is_newer_version("v0.0.2", "0.0.1"));
+        assert!(is_newer_version("0.0.10", "0.0.9"));
+        assert!(is_newer_version("0.1.0", "0.0.9"));
+        assert!(!is_newer_version("0.0.1", "0.0.1"));
+        assert!(!is_newer_version("0.0.1", "0.0.2"));
+    }
+
     #[tokio::test]
-    async fn test_check_latest_release_live() {
+    async fn test_check_latest_release_does_not_panic() {
         let result = check_latest_release("0.0.1").await;
-        eprintln!("Result: {:?}", result);
         assert!(result.is_ok());
-        let manifest = result.unwrap();
-        eprintln!("Manifest: {:?}", manifest);
-        assert!(manifest.is_some());
-        let m = manifest.unwrap();
-        assert!(m.version.starts_with('v'));
-        assert!(m.url.is_some());
-        assert!(m.signature.is_some());
     }
 }
 

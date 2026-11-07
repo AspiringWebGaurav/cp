@@ -10,13 +10,15 @@ import type { SystemInfo, ClipboardFileInfo, TransferState, ProgressUpdate, Rele
 export default function App() {
   const [currentVersion, setCurrentVersion] = useState<string>('0.0.1');
   const [systemInfo, setSystemInfo] = useState<SystemInfo>({
-    computerName: 'GAURAV',
+    computerName: 'NAMITA',
     status: 'ON (intercepting)',
-    hardware: 'NVMe SSD + SATA HDD',
+    hardware: 'NVMe SSD',
     engineVersion: '0.0.1',
     transfersCompleted: 0,
     volumeMoved: '0 B',
     speedRating: 'PCIe 3.0 / 3.4 GB/s',
+    processor: 'Intel Core Processor',
+    memory: '8 GB RAM',
   });
 
   const [clipboardFiles, setClipboardFiles] = useState<ClipboardFileInfo | null>(null);
@@ -48,6 +50,11 @@ export default function App() {
   const updateManifestRef = useRef<ReleaseManifest | null>(null);
   const updateStateRef = useRef<UpdateUIState>('checking');
   const updateReasonRef = useRef<UpdateTriggerReason>('startup');
+  const isUpdatingInProgress = useRef(false);
+  const userDismissedUpdate = useRef(false);
+  const lastUpdateCheckTime = useRef(0);
+  const isPastingInProgressRef = useRef(false);
+  const lastPasteTimeRef = useRef(0);
 
   useEffect(() => {
     updateManifestRef.current = updateManifest;
@@ -57,7 +64,8 @@ export default function App() {
 
   const handleStartUpdate = async (targetManifest?: ReleaseManifest) => {
     const target = targetManifest || updateManifestRef.current;
-    if (!target) return;
+    if (!target || isUpdatingInProgress.current) return;
+    isUpdatingInProgress.current = true;
     const isPendingPaste = updateReasonRef.current === 'copy';
     setUpdateState('downloading');
     setUpdateError(null);
@@ -68,35 +76,88 @@ export default function App() {
       console.error('Update failed:', err);
       setUpdateError(err?.message || String(err));
       setUpdateState('error');
+    } finally {
+      isUpdatingInProgress.current = false;
     }
   };
 
-  const checkForUpdates = async (reason: UpdateTriggerReason = 'startup') => {
-    setIsCheckingUpdate(true);
+  const refreshTelemetry = async () => {
     try {
-      const ver = await tauriApi.getAppVersion().catch(() => '0.0.1');
+      const [info, ver] = await Promise.all([
+        tauriApi.getSystemInfo().catch(() => null),
+        tauriApi.getAppVersion().catch(() => null),
+      ]);
+      if (info) {
+        setSystemInfo(info);
+      }
+      if (ver) {
+        setCurrentVersion(ver);
+        setSystemInfo((prev) => ({ ...prev, engineVersion: ver }));
+      }
+    } catch (e) {
+      console.warn('Telemetry refresh warning:', e);
+    }
+  };
+
+  const checkForUpdates = async (reason: UpdateTriggerReason = 'landing', force = false) => {
+    const shouldForce = force || reason === 'landing' || reason === 'manual' || reason === 'startup';
+    const now = Date.now();
+    if (!shouldForce && now - lastUpdateCheckTime.current < 2500) {
+      return;
+    }
+    lastUpdateCheckTime.current = now;
+
+    setIsCheckingUpdate(true);
+    const checkStartTime = Date.now();
+
+    try {
+      const ver = await tauriApi.getAppVersion().catch(() => currentVersion);
       setCurrentVersion(ver);
       setSystemInfo((prev) => ({ ...prev, engineVersion: ver }));
 
       const manifest = await tauriApi.checkUpdate(ver);
+
+      // Keep minimum 600ms visual spin so the user has crisp, clear feedback that GPHost was queried
+      const elapsed = Date.now() - checkStartTime;
+      if (elapsed < 600) {
+        await new Promise((r) => setTimeout(r, 600 - elapsed));
+      }
+
       if (manifest && manifest.version) {
         setUpdateManifest(manifest);
         setUpdateReason(reason);
-        // Only show window and start update immediately if explicitly requested (manual check or copy)
-        // Background startup check stays completely silent in system tray so copy/paste interception can be tested!
-        if (reason === 'manual' || reason === 'copy') {
+        setUpdateState('available');
+
+        // Automatically trigger update when:
+        // 1. Forced check (e.g. user clicked Update badge)
+        // 2. Manual check
+        // 3. Intercepted Copy/Paste
+        // 4. User opened the landing UI (like after install, or from tray) unless user explicitly dismissed it this session
+        const shouldAutoUpdate =
+          force ||
+          reason === 'manual' ||
+          reason === 'copy' ||
+          ((reason === 'startup' || reason === 'landing') && !userDismissedUpdate.current);
+
+        if (shouldAutoUpdate) {
           setActiveTab('update');
           await tauriApi.showWindow().catch(() => {});
           handleStartUpdate(manifest);
         }
       } else {
         setUpdateManifest(null);
-        if (reason === 'manual') {
+        setUpdateState('checking');
+        if (reason === 'manual' || reason === 'landing') {
           setActiveTab('status');
         }
       }
     } catch (err: any) {
-      if (reason === 'manual') {
+      console.warn('Update check note:', err);
+      const elapsed = Date.now() - checkStartTime;
+      if (elapsed < 600) {
+        await new Promise((r) => setTimeout(r, 600 - elapsed));
+      }
+      if (reason === 'manual' || reason === 'copy') {
         setUpdateError(err?.message || String(err));
         setUpdateState('error');
         setActiveTab('update');
@@ -106,23 +167,34 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    const refreshTelemetry = () => {
-      tauriApi.getSystemInfo()
-        .then((info) => {
-          setSystemInfo(info);
-          if (info.engineVersion) {
-            setCurrentVersion(info.engineVersion);
-          }
-        })
-        .catch(() => {});
-    };
+  const refreshLandingUI = async (reason: UpdateTriggerReason = 'landing', force = false) => {
+    await refreshTelemetry();
 
-    refreshTelemetry();
+    const isUpdatingNow =
+      updateStateRef.current === 'downloading' ||
+      updateStateRef.current === 'verifying' ||
+      updateStateRef.current === 'ready' ||
+      updateStateRef.current === 'restarting';
+
+    if (isUpdatingNow) {
+      setActiveTab('update');
+      return;
+    }
+
+    await checkForUpdates(reason, force);
+  };
+
+  useEffect(() => {
+    // Initial refresh of telemetry and auto-update check on landing UI open
+    refreshLandingUI('startup');
+
+    // Interval for real-time telemetry metrics
     const interval = setInterval(refreshTelemetry, 2000);
 
-    // Initial autonomous update check on application startup
-    checkForUpdates('startup');
+    // Periodic background update check every 60 seconds
+    const bgUpdateInterval = setInterval(() => {
+      checkForUpdates('startup');
+    }, 60000);
 
     // Check if app just restarted from a seamless self-update while user was copying/pasting
     tauriApi.checkPendingPaste()
@@ -145,6 +217,11 @@ export default function App() {
     let unlistenAutoPaste: (() => void) | undefined;
     listen('trigger-auto-paste', async () => {
       try {
+        const now = Date.now();
+        if (isPastingInProgressRef.current || now - lastPasteTimeRef.current < 1200) {
+          return;
+        }
+
         const isUpdatingNow =
           updateStateRef.current === 'downloading' ||
           updateStateRef.current === 'verifying' ||
@@ -172,19 +249,25 @@ export default function App() {
       }
     }).then((u) => { unlistenAutoPaste = u; }).catch(() => {});
 
+    // Refresh landing UI whenever console window is opened or shown from tray
     let unlistenShowConsole: (() => void) | undefined;
     listen('show-console', () => {
-      const isUpdatingNow =
-        updateStateRef.current === 'downloading' ||
-        updateStateRef.current === 'verifying' ||
-        updateStateRef.current === 'ready' ||
-        updateStateRef.current === 'restarting';
-      if (isUpdatingNow || updateManifestRef.current) {
-        setActiveTab('update');
-      } else {
-        setActiveTab('status');
-      }
+      refreshLandingUI('landing', true);
     }).then((u) => { unlistenShowConsole = u; }).catch(() => {});
+
+    // Refresh landing UI whenever window regains user focus
+    const handleWindowFocus = () => {
+      refreshLandingUI('landing', true);
+    };
+    window.addEventListener('focus', handleWindowFocus);
+
+    // Refresh landing UI whenever document becomes visible
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        refreshLandingUI('landing', true);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     let unlistenProgress: (() => void) | undefined;
     listen<ProgressUpdate>('transfer-progress', (event) => {
@@ -214,37 +297,27 @@ export default function App() {
       }
     }).then((u) => { unlistenUpdateProgress = u; }).catch(() => {});
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key.toLowerCase() === 'v') {
-        const isUpdatingNow =
-          updateStateRef.current === 'downloading' ||
-          updateStateRef.current === 'verifying' ||
-          updateStateRef.current === 'ready' ||
-          updateStateRef.current === 'restarting';
-        if (isUpdatingNow || updateManifestRef.current) {
-          setUpdateReason('copy');
-          setActiveTab('update');
-          return;
-        }
-        handlePasteWithCP();
-      } else if (e.key.toLowerCase() === 't') {
-        startBenchmarkTransfer();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
     return () => {
       clearInterval(interval);
+      clearInterval(bgUpdateInterval);
+      window.removeEventListener('focus', handleWindowFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
       if (unlistenStats) unlistenStats();
       if (unlistenAutoPaste) unlistenAutoPaste();
       if (unlistenShowConsole) unlistenShowConsole();
       if (unlistenProgress) unlistenProgress();
       if (unlistenUpdateProgress) unlistenUpdateProgress();
-      window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
 
   const handlePasteWithCP = async (info?: ClipboardFileInfo) => {
+    const now = Date.now();
+    if (isPastingInProgressRef.current || now - lastPasteTimeRef.current < 1200) {
+      return;
+    }
+    isPastingInProgressRef.current = true;
+    lastPasteTimeRef.current = now;
+
     const isUpdatingNow =
       updateStateRef.current === 'downloading' ||
       updateStateRef.current === 'verifying' ||
@@ -259,32 +332,41 @@ export default function App() {
       if (updateManifestRef.current && !isUpdatingNow && updateStateRef.current !== 'error') {
         handleStartUpdate(updateManifestRef.current);
       }
+      isPastingInProgressRef.current = false;
       return;
     }
 
     const target = info || clipboardFiles;
-    if (!target || target.filePaths.length === 0) return;
+    if (!target || target.filePaths.length === 0) {
+      isPastingInProgressRef.current = false;
+      return;
+    }
 
     const destDir = target.activeExplorerPath || 'D:\\';
-    const src = target.filePaths[0];
-
     setActiveTab('transfer');
-    setTransfer({
-      isActive: true,
-      isPaused: false,
-      source: src,
-      destination: destDir,
-      currentFile: target.primaryName,
-      progress: 0,
-      speed: 'Starting...',
-      bytesTransferred: '0 B',
-      totalBytes: target.formattedSize,
-      eta: 'Calculating...',
-    });
 
     try {
-      const updated = await tauriApi.executeCopyTransfer(src, destDir);
-      setSystemInfo(updated);
+      for (let i = 0; i < target.filePaths.length; i++) {
+        const src = target.filePaths[i];
+        const fileName = src.split(/[/\\]/).pop() || target.primaryName;
+
+        setTransfer({
+          isActive: true,
+          isPaused: false,
+          source: src,
+          destination: destDir,
+          currentFile: target.filePaths.length > 1 ? `(${i + 1}/${target.filePaths.length}) ${fileName}` : fileName,
+          progress: 0,
+          speed: 'Starting...',
+          bytesTransferred: '0 B',
+          totalBytes: target.formattedSize,
+          eta: 'Calculating...',
+        });
+
+        const updated = await tauriApi.executeCopyTransfer(src, destDir);
+        setSystemInfo(updated);
+      }
+
       setTransfer((prev) => ({
         ...prev,
         progress: 100,
@@ -293,14 +375,19 @@ export default function App() {
         eta: 'Complete!',
         isActive: false,
       }));
+
       setTimeout(async () => {
         await tauriApi.hideWindow().catch(() => {});
         setActiveTab('status');
       }, 1000);
     } catch (err) {
-      console.error('Transfer failed or cancelled:', err);
+      console.warn('Transfer completed, canceled, or stopped:', err);
+      setTransfer((prev) => ({ ...prev, isActive: false, progress: 0 }));
       await tauriApi.hideWindow().catch(() => {});
       setActiveTab('status');
+      refreshTelemetry();
+    } finally {
+      isPastingInProgressRef.current = false;
     }
   };
 
@@ -315,59 +402,11 @@ export default function App() {
     setTransfer((p) => ({ ...p, isActive: false, progress: 0 }));
     await tauriApi.hideWindow().catch(() => {});
     setActiveTab('status');
-  };
-
-  const startBenchmarkTransfer = () => {
-    setActiveTab('transfer');
-    setTransfer({
-      isActive: true,
-      isPaused: false,
-      source: 'C:\\Downloads\\Ubuntu-24.04-LTS-Desktop-x86_64.iso',
-      destination: 'D:\\',
-      currentFile: 'Ubuntu-24.04-LTS-Desktop-x86_64.iso',
-      progress: 0,
-      speed: '3.4 GB/s',
-      bytesTransferred: '0.0 GB',
-      totalBytes: '8.25 GB',
-      eta: '2.4s',
-    });
-
-    const interval = setInterval(() => {
-      setTransfer((prev) => {
-        if (prev.isPaused) return prev;
-        const next = Math.min(100, prev.progress + 10);
-        const transferred = ((next / 100) * 8.25).toFixed(2);
-        if (next >= 100) {
-          clearInterval(interval);
-          tauriApi.recordTransfer(8858370048)
-            .then((updated) => setSystemInfo(updated))
-            .catch(() => {});
-          setTimeout(async () => {
-            await tauriApi.hideWindow().catch(() => {});
-            setActiveTab('status');
-          }, 1200);
-          return {
-            ...prev,
-            progress: 100,
-            bytesTransferred: '8.25 GB',
-            speed: '0 MB/s',
-            eta: 'Complete!',
-            isActive: false,
-          };
-        }
-        return {
-          ...prev,
-          progress: next,
-          bytesTransferred: `${transferred} GB`,
-          speed: (3.1 + Math.random() * 0.4).toFixed(2) + ' GB/s',
-          eta: `${Math.max(0.1, (2.4 * (1 - next / 100))).toFixed(1)}s`,
-        };
-      });
-    }, 150);
+    refreshTelemetry();
   };
 
   return (
-    <div className="w-full h-full min-h-[290px] bg-white text-zinc-900 select-none flex flex-col justify-between p-4 sm:p-5 border border-zinc-200/80 shadow-xs text-[13px] font-sans antialiased overflow-hidden">
+    <div className="w-full h-full bg-white text-zinc-900 select-none flex flex-col justify-between p-3.5 text-[12px] font-sans antialiased overflow-hidden">
       {/* 1. Header Lockup */}
       <Header 
         currentVersion={currentVersion}
@@ -375,25 +414,38 @@ export default function App() {
         targetVersion={updateManifest?.version}
         isChecking={isCheckingUpdate}
         onOpenUpdate={() => {
+          userDismissedUpdate.current = false;
           setUpdateReason('manual');
           setActiveTab('update');
+          if (updateManifestRef.current) {
+            handleStartUpdate(updateManifestRef.current);
+          } else {
+            checkForUpdates('manual', true);
+          }
         }}
-        onCheckUpdate={() => checkForUpdates('manual')}
+        onCheckUpdate={() => {
+          userDismissedUpdate.current = false;
+          refreshLandingUI('manual', true);
+        }}
       />
 
-      {/* 2. Middle Content Area with Separate UI for Updating */}
+      {/* 2. Middle Content Area */}
       {activeTab === 'status' ? (
-        <div className="flex flex-col justify-center my-auto">
-          <StatusGrid 
-            systemInfo={systemInfo} 
-            hasUpdate={Boolean(updateManifest)}
-            targetVersion={updateManifest?.version}
-            onOpenUpdate={() => {
-              setUpdateReason('manual');
-              setActiveTab('update');
-            }}
-          />
-        </div>
+        <StatusGrid 
+          systemInfo={systemInfo} 
+          hasUpdate={Boolean(updateManifest)}
+          targetVersion={updateManifest?.version}
+          onOpenUpdate={() => {
+            userDismissedUpdate.current = false;
+            setUpdateReason('manual');
+            setActiveTab('update');
+            if (updateManifestRef.current) {
+              handleStartUpdate(updateManifestRef.current);
+            } else {
+              checkForUpdates('manual', true);
+            }
+          }}
+        />
       ) : activeTab === 'transfer' ? (
         <TransferView 
           transfer={transfer} 
@@ -408,9 +460,18 @@ export default function App() {
           reason={updateReason}
           progress={updateProgress}
           errorMessage={updateError}
-          onStartUpdate={() => handleStartUpdate()}
-          onCancel={() => setActiveTab('status')}
-          onRetry={() => handleStartUpdate()}
+          onStartUpdate={() => {
+            userDismissedUpdate.current = false;
+            handleStartUpdate();
+          }}
+          onCancel={() => {
+            userDismissedUpdate.current = true;
+            setActiveTab('status');
+          }}
+          onRetry={() => {
+            userDismissedUpdate.current = false;
+            handleStartUpdate();
+          }}
         />
       )}
     </div>

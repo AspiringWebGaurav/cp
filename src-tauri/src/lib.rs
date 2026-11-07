@@ -6,7 +6,7 @@ pub mod autostart;
 pub mod resilience;
 
 use hardware::{probe_system_info, record_completed_transfer, reset_real_stats, SystemInfo};
-use engine::{run_benchmark, BenchmarkResult, inspect_clipboard_files, ClipboardFileInfo, copy_file_streaming};
+use engine::{run_benchmark, BenchmarkResult, inspect_clipboard_files, ClipboardFileInfo};
 use ota::{check_latest_release, ReleaseManifest};
 use std::path::PathBuf;
 
@@ -68,27 +68,37 @@ async fn execute_copy_transfer(
 ) -> Result<SystemInfo, String> {
     use tauri::Emitter;
 
+    // Concurrency Lock: Prevent multiple parallel copy executions
+    if !engine::try_acquire_transfer() {
+        return Err("A file transfer is already actively running".to_string());
+    }
+
+    struct TransferLockGuard;
+    impl Drop for TransferLockGuard {
+        fn drop(&mut self) {
+            engine::release_transfer();
+        }
+    }
+    let _guard = TransferLockGuard;
+
     let src = PathBuf::from(&source_path);
     if !src.exists() {
         return Err(format!("Source path does not exist: {}", source_path));
     }
 
-    let file_name = src
-        .file_name()
-        .ok_or_else(|| "Invalid source filename".to_string())?
-        .to_os_string();
-
     let dst_dir = PathBuf::from(&destination_dir);
     if !dst_dir.exists() {
         let _ = std::fs::create_dir_all(&dst_dir);
     }
-    let dst = dst_dir.join(file_name);
+
+    // Generate unique, collision-proof destination path (handles " - Copy" on same folder or existing name)
+    let dst = engine::generate_unique_destination_path(&src, &dst_dir);
 
     let app_handle = app.clone();
     let bytes_copied = tokio::task::spawn_blocking(move || {
         let mut last_emit = std::time::Instant::now();
 
-        copy_file_streaming(&src, &dst, |copied, total, speed_gb| {
+        engine::copy_path_streaming(&src, &dst, |copied, total, speed_gb| {
             let now = std::time::Instant::now();
             let should_emit = copied == total || now.duration_since(last_emit).as_millis() >= 40;
 
@@ -159,10 +169,11 @@ fn hide_window(app: tauri::AppHandle) {
 
 #[tauri::command]
 fn show_window(app: tauri::AppHandle) {
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
+        let _ = win.emit("show-console", ());
     }
 }
 
@@ -195,15 +206,118 @@ fn check_and_consume_pending_paste() -> bool {
 }
 
 #[tauri::command]
-async fn download_and_install_update(
+fn verify_update_signature(
+    container_bytes: Vec<u8>,
+    signature: String,
+) -> Result<bool, String> {
+    ota::verify_binary(&container_bytes, Some(&signature)).map(|_| true)
+}
+
+#[tauri::command]
+fn write_update_staging_file(file_name: String, bytes: Vec<u8>) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir().join("com.cp.engine");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let target_file = temp_dir.join(&file_name);
+        let part_file = temp_dir.join(format!("{}.part", file_name));
+
+        // 1. Write to temporary .part file first
+        {
+            let mut file = std::fs::File::create(&part_file)
+                .map_err(|e| format!("Could not create staging part file: {}", e))?;
+            file.write_all(&bytes)
+                .map_err(|e| format!("Could not write staging file: {}", e))?;
+            file.flush()
+                .map_err(|e| format!("Could not flush staging file: {}", e))?;
+        }
+
+        // 2. Atomic swap to final staged filename
+        if target_file.exists() {
+            let _ = std::fs::remove_file(&target_file);
+        }
+        std::fs::rename(&part_file, &target_file)
+            .map_err(|e| format!("Could not finalize staging file: {}", e))?;
+
+        Ok(target_file.to_string_lossy().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (file_name, bytes);
+        Err("In-process staging is supported on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+fn apply_in_process_update(
     app: tauri::AppHandle,
-    manifest: ReleaseManifest,
+    staging_path: String,
+    target_version: String,
     pending_paste: Option<bool>,
-) -> Result<String, String> {
-    let target_version = manifest.version.clone();
-    let staged_path = ota::download_and_stage_update(&app, &manifest).await?;
-    ota::apply_update_and_restart(app, staged_path, target_version, pending_paste.unwrap_or(false))?;
-    Ok("Update staging complete. Restarting...".to_string())
+) -> Result<(), String> {
+    ota::apply_update_and_restart(
+        app,
+        std::path::PathBuf::from(staging_path),
+        target_version,
+        pending_paste.unwrap_or(false),
+    )
+}
+
+#[tauri::command]
+async fn download_update_container(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<Vec<u8>, String> {
+    ota::download_binary_container(Some(&app), &url).await
+}
+
+#[cfg(target_os = "windows")]
+static IS_POSITION_LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn fixed_position_subclass(
+    hwnd: windows_sys::Win32::Foundation::HWND,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    _uid_subclass: usize,
+    _ref_data: usize,
+) -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCLBUTTONDBLCLK, WM_SYSCOMMAND,
+        WM_WINDOWPOSCHANGING, HTCAPTION, HTBORDER, SC_MOVE, SWP_NOMOVE, WINDOWPOS,
+    };
+    use windows_sys::Win32::UI::Shell::DefSubclassProc;
+
+    // 1. Block mouse drag on titlebar:
+    // If Windows tests mouse location on caption, return HTBORDER so Windows treats it as a static border.
+    // Close button [X] returns HTCLOSE (20) and remains fully functional.
+    if msg == WM_NCHITTEST {
+        let hit = DefSubclassProc(hwnd, msg, wparam, lparam);
+        if hit == HTCAPTION as isize {
+            return HTBORDER as isize;
+        }
+        return hit;
+    }
+
+    // 2. Block mouse down and double click on titlebar (HTCAPTION = 2)
+    if (msg == WM_NCLBUTTONDOWN || msg == WM_NCLBUTTONDBLCLK) && wparam == HTCAPTION as usize {
+        return 0;
+    }
+
+    // 3. Block system menu / keyboard "Move" command
+    if msg == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_MOVE as usize {
+        return 0;
+    }
+
+    // 4. Freeze position once centered: force SWP_NOMOVE flag so nothing can relocate the window
+    if IS_POSITION_LOCKED.load(std::sync::atomic::Ordering::Relaxed) && msg == WM_WINDOWPOSCHANGING {
+        let pos = &mut *(lparam as *mut WINDOWPOS);
+        pos.flags |= SWP_NOMOVE;
+    }
+
+    DefSubclassProc(hwnd, msg, wparam, lparam)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -218,6 +332,9 @@ pub fn run() {
             interceptor::start_explorer_interceptor(app.handle().clone());
 
             if let Some(main_win) = app.get_webview_window("main") {
+                // Ensure window is centered on screen
+                let _ = main_win.center();
+
                 if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../icons/128x128.png")) {
                     let _ = main_win.set_icon(icon);
                 }
@@ -228,10 +345,12 @@ pub fn run() {
                         GetWindowLongW, SetWindowLongW, SetWindowPos,
                         GWL_STYLE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_THICKFRAME,
                         GetSystemMenu, DeleteMenu, MF_BYCOMMAND,
-                        SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE, SC_SIZE,
+                        SC_MINIMIZE, SC_MAXIMIZE, SC_RESTORE, SC_SIZE, SC_MOVE,
                         DrawMenuBar,
                         SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
                     };
+                    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+
                     if let Ok(hwnd) = main_win.hwnd() {
                         let hwnd_val = hwnd.0 as _;
                         unsafe {
@@ -241,13 +360,14 @@ pub fn run() {
                             let new_style = style & !(WS_MINIMIZEBOX as i32) & !(WS_MAXIMIZEBOX as i32) & !(WS_THICKFRAME as i32);
                             SetWindowLongW(hwnd_val, GWL_STYLE, new_style);
 
-                            // Clean the system menu as well
+                            // Clean the system menu as well (remove minimize, maximize, restore, size, and move)
                             let hmenu = GetSystemMenu(hwnd_val, 0);
                             if !hmenu.is_null() {
                                 DeleteMenu(hmenu, SC_MINIMIZE as u32, MF_BYCOMMAND);
                                 DeleteMenu(hmenu, SC_MAXIMIZE as u32, MF_BYCOMMAND);
                                 DeleteMenu(hmenu, SC_RESTORE as u32, MF_BYCOMMAND);
                                 DeleteMenu(hmenu, SC_SIZE as u32, MF_BYCOMMAND);
+                                DeleteMenu(hmenu, SC_MOVE as u32, MF_BYCOMMAND);
                             }
 
                             DrawMenuBar(hwnd_val);
@@ -260,6 +380,10 @@ pub fn run() {
                                 0,
                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
                             );
+
+                            // Install Win32 subclass to permanently lock position (non-movable)
+                            SetWindowSubclass(hwnd_val, Some(fixed_position_subclass), 1, 0);
+                            IS_POSITION_LOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                     }
                 }
@@ -275,7 +399,7 @@ pub fn run() {
                         }
                     };
 
-                    let force_show = has_pending_paste || args.iter().any(|a| {
+                    let force_show = cfg!(debug_assertions) || has_pending_paste || args.iter().any(|a| {
                         a == "--show" || a == "--restarted" || a == "--update-restart" || a == "--landing" || a == "--first-install"
                     });
 
@@ -296,8 +420,10 @@ pub fn run() {
                     };
 
                     if should_show {
+                        use tauri::Emitter;
                         let _ = main_win.show();
                         let _ = main_win.set_focus();
+                        let _ = main_win.emit("show-console", ());
                     }
                 }
 
@@ -390,41 +516,6 @@ pub fn run() {
                     .build(app);
             }
 
-            // Dev Mode Watchdog: If the development terminal ends, automatically terminate cp.exe
-            // so it never lingers or gets stuck in the system tray when no dev environment is running!
-            #[cfg(debug_assertions)]
-            {
-                std::thread::spawn(|| {
-                    use std::net::TcpStream;
-                    use std::time::Duration;
-
-                    // Allow 5 seconds grace period for Vite dev server to start
-                    std::thread::sleep(Duration::from_secs(5));
-
-                    let mut failed_checks = 0;
-                    loop {
-                        std::thread::sleep(Duration::from_secs(2));
-                        // Ping Vite dev server on port 1420
-                        match TcpStream::connect_timeout(
-                            &std::net::SocketAddr::from(([127, 0, 0, 1], 1420)),
-                            Duration::from_millis(800),
-                        ) {
-                            Ok(_) => {
-                                failed_checks = 0;
-                            }
-                            Err(_) => {
-                                failed_checks += 1;
-                                // If Vite is unreachable for 2 consecutive checks, development terminal has ended!
-                                if failed_checks >= 2 {
-                                    resilience::authorize_explicit_exit();
-                                    std::process::exit(0);
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-
             // Synchronize autostart in Windows Registry (HKCU\Software\Microsoft\Windows\CurrentVersion\Run)
             #[cfg(not(debug_assertions))]
             autostart::sync_autostart_on_boot();
@@ -444,7 +535,10 @@ pub fn run() {
             run_transfer_benchmark,
             check_update,
             get_app_version,
-            download_and_install_update,
+            download_update_container,
+            verify_update_signature,
+            write_update_staging_file,
+            apply_in_process_update,
             check_and_consume_pending_paste,
             is_autostart_enabled,
             set_autostart_enabled
@@ -454,20 +548,72 @@ pub fn run() {
         .run(|_app, event| {
             match event {
                 tauri::RunEvent::ExitRequested { api, .. } => {
-                    // In release mode: Do not let random events or window destruction kill the background service!
-                    // Only exit if user clicked "Quit CP" in tray (which sets authorize_explicit_exit)
-                    #[cfg(not(debug_assertions))]
-                    {
-                        if !resilience::is_exit_authorized() {
-                            api.prevent_exit();
-                        }
-                    }
-                    #[cfg(debug_assertions)]
-                    {
-                        let _ = api;
+                    if !resilience::is_exit_authorized() {
+                        api.prevent_exit();
                     }
                 }
                 _ => {}
             }
         });
+}
+
+#[cfg(all(test, target_os = "windows", target_env = "gnu"))]
+mod msvc_gnu_compat {
+    #[export_name = "__security_cookie"]
+    pub static mut SECURITY_COOKIE: usize = 0x2B99_2DDF_A232;
+
+    #[export_name = "__security_check_cookie"]
+    pub unsafe extern "C" fn security_check_cookie(_cookie: usize) {}
+
+    #[export_name = "??_V@YAXPEAX@Z"]
+    pub unsafe extern "C" fn msvc_operator_delete_arr(ptr: *mut std::ffi::c_void) {
+        if !ptr.is_null() {
+            windows_sys::Win32::System::Memory::HeapFree(
+                windows_sys::Win32::System::Memory::GetProcessHeap(),
+                0,
+                ptr,
+            );
+        }
+    }
+
+    #[export_name = "??3@YAXPEAX_K@Z"]
+    pub unsafe extern "C" fn msvc_operator_delete_sized(ptr: *mut std::ffi::c_void, _size: usize) {
+        if !ptr.is_null() {
+            windows_sys::Win32::System::Memory::HeapFree(
+                windows_sys::Win32::System::Memory::GetProcessHeap(),
+                0,
+                ptr,
+            );
+        }
+    }
+
+    #[export_name = "??_U@YAPEAX_K@Z"]
+    pub unsafe extern "C" fn msvc_operator_new_arr(size: usize) -> *mut std::ffi::c_void {
+        windows_sys::Win32::System::Memory::HeapAlloc(
+            windows_sys::Win32::System::Memory::GetProcessHeap(),
+            0,
+            size,
+        )
+    }
+
+    #[export_name = "??2@YAPEAX_KAEBUnothrow_t@std@@@Z"]
+    pub unsafe extern "C" fn msvc_operator_new_nothrow(size: usize, _nothrow: *const u8) -> *mut std::ffi::c_void {
+        windows_sys::Win32::System::Memory::HeapAlloc(
+            windows_sys::Win32::System::Memory::GetProcessHeap(),
+            0,
+            size,
+        )
+    }
+
+    #[export_name = "?nothrow@std@@3Unothrow_t@1@B"]
+    pub static NOTHROW: u8 = 0;
+
+    #[export_name = "_Init_thread_epoch"]
+    pub static mut INIT_THREAD_EPOCH: i32 = 0;
+
+    #[export_name = "_Init_thread_header"]
+    pub unsafe extern "C" fn init_thread_header(_val: *mut i32) {}
+
+    #[export_name = "_Init_thread_footer"]
+    pub unsafe extern "C" fn init_thread_footer(_val: *mut i32) {}
 }

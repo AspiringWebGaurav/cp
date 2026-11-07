@@ -76,10 +76,14 @@ cp/
 git clone https://github.com/AspiringWebGaurav/cp.git
 cd cp
 
-# 2. Install frontend dependencies
+# 2. Install dependencies & verify toolchain
 npm install
+npm run doctor
 
-# 3. Launch local dev environment (supervised native Win32 window)
+# 3. Check GPHost cloud storage readiness
+npm run gphost:audit
+
+# 4. Launch local dev environment (supervised native Win32 window)
 npm run dev
 ```
 
@@ -88,9 +92,8 @@ npm run dev
 CP uses an encrypted vault container (`cp-vault.enc`) to restore configuration and offline rules when cloning onto a clean machine:
 
 ```bash
-# Restore workspace configuration
+# Restore workspace configuration (enter master passphrase when prompted)
 npm run vault:unpack
-# Default master passphrase: 5737.5737
 ```
 
 ---

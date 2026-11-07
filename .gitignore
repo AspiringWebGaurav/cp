@@ -3,22 +3,41 @@
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. AI Agent Offline Brain, Rules & Private Memory (PRESERVED IN VAULT)
+# 1. AI Agent Offline Brain, Rules & Local Directives (PRESERVED IN VAULT)
 # ------------------------------------------------------------------------------
 .local/
 /.local/
 **/.local/**
+local/
+/local/
+**/local/**
+*.local
+*.local.*
+**/*.local
 AGENTS.md
 GEMINI.md
+PROJECT_RULES.md
+PROJECT_MAP.json
+/PROJECT_MAP.json
+project-map*.json
 .agents/
+**/.agents/**
+.vault/
+vault/
 .vault_attempts
 test-vault-verification/
-vault/
-scripts/
-docs/
 
 # ------------------------------------------------------------------------------
-# 2. Environment Files & Secret Credentials (PRESERVED IN ENCRYPTED VAULT)
+# 2. Proprietary Scripts & Automation (Only Vault Runner is Tracked on GitHub; All Else in Vault)
+# ------------------------------------------------------------------------------
+scripts/*
+!scripts/vault.mjs
+docs/
+/docs/
+**/docs/**
+
+# ------------------------------------------------------------------------------
+# 3. Environment Files & Secret Credentials (PRESERVED IN VAULT, KEPT LOCAL)
 # ------------------------------------------------------------------------------
 .env
 .env.*
@@ -26,14 +45,16 @@ docs/
 *.env
 *.env.*
 *.local
+*.local.*
 !.env.example
 
 # ------------------------------------------------------------------------------
-# 3. Tauri Private Signing Keys & Secrets (PRESERVED IN ENCRYPTED VAULT)
+# 4. Tauri Private Signing Keys & Secrets (PRESERVED IN VAULT, KEPT LOCAL)
 # ------------------------------------------------------------------------------
 .tauri/
 **/.tauri/**
 *.key
+*.key.pub
 
 # ------------------------------------------------------------------------------
 # 4. Encrypted Vault Container (Tracked on GitHub for Instant Recovery)

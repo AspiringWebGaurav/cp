@@ -13,6 +13,8 @@ pub struct SystemInfo {
     pub transfers_completed: u32,
     pub volume_moved: String,
     pub speed_rating: String,
+    pub processor: String,
+    pub memory: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -89,24 +91,175 @@ pub fn probe_system_info() -> SystemInfo {
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "GAURAV".to_string());
 
+    let status = if crate::interceptor::is_interceptor_active() {
+        "ON (intercepting)".to_string()
+    } else {
+        "ON (idle)".to_string()
+    };
+
     let hardware_desc = detect_storage_topology();
     let speed_desc = detect_speed_rating();
     let stats = load_real_stats();
+    let processor = detect_processor_name();
+    let memory = detect_ram_capacity();
 
     SystemInfo {
         computer_name,
-        status: "ON (intercepting)".to_string(),
+        status,
         hardware: hardware_desc,
         engine_version: crate::ota::resolve_current_version(),
         transfers_completed: stats.transfers_completed,
         volume_moved: format_bytes(stats.total_bytes_moved),
         speed_rating: speed_desc,
+        processor,
+        memory,
     }
 }
 
-/// Zero-process hardware storage topology probe (never spawns PowerShell or conhost)
-fn detect_storage_topology() -> String {
-    "NVMe SSD + SATA HDD".to_string()
+/// Zero-process dynamic hardware storage topology probe (reads registry & drive geometry in <0.5ms)
+pub fn detect_storage_topology() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        if let Ok(disk_enum) = hklm.open_subkey("SYSTEM\\CurrentControlSet\\Services\\disk\\Enum") {
+            let count: u32 = disk_enum.get_value("Count").unwrap_or(0);
+            let mut detected = Vec::new();
+
+            for i in 0..count {
+                let key_name = format!("{}", i);
+                if let Ok(dev_path) = disk_enum.get_value::<String, _>(&key_name) {
+                    let sub_path = format!("SYSTEM\\CurrentControlSet\\Enum\\{}", dev_path);
+                    let friendly: String = if let Ok(dev_key) = hklm.open_subkey(&sub_path) {
+                        dev_key.get_value("FriendlyName").unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+
+                    let path_upper = dev_path.to_uppercase();
+                    let friendly_upper = friendly.to_uppercase();
+                    let is_nvme = path_upper.contains("NVME") || friendly_upper.contains("NVME");
+                    let is_ssd = is_nvme || path_upper.contains("SSD") || friendly_upper.contains("SSD");
+
+                    let brand = if !friendly.is_empty() {
+                        friendly.split_whitespace().next().unwrap_or("")
+                    } else {
+                        ""
+                    };
+
+                    let disk_type = if is_nvme {
+                        if !brand.is_empty() && brand != "NVMe" && brand != "Disk" {
+                            format!("{} NVMe SSD", brand)
+                        } else {
+                            "NVMe SSD".to_string()
+                        }
+                    } else if is_ssd {
+                        if !brand.is_empty() && brand != "Disk" {
+                            format!("{} SSD", brand)
+                        } else {
+                            "SATA SSD".to_string()
+                        }
+                    } else {
+                        "SATA HDD".to_string()
+                    };
+
+                    if !detected.contains(&disk_type) {
+                        detected.push(disk_type);
+                    }
+                }
+            }
+
+            if !detected.is_empty() {
+                let capacity = probe_total_storage_capacity();
+                if !capacity.is_empty() {
+                    return format!("{} ({})", detected.join(" + "), capacity);
+                }
+                return detected.join(" + ");
+            }
+        }
+    }
+    "NVMe SSD".to_string()
+}
+
+/// Probes total primary volume size in GB without subprocesses
+fn probe_total_storage_capacity() -> String {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let c_drive: Vec<u16> = "C:\\\0".encode_utf16().collect();
+        let mut free_bytes_avail: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut total_free: u64 = 0;
+        if GetDiskFreeSpaceExW(
+            c_drive.as_ptr(),
+            &mut free_bytes_avail,
+            &mut total_bytes,
+            &mut total_free,
+        ) != 0 {
+            let d_drive: Vec<u16> = "D:\\\0".encode_utf16().collect();
+            let mut d_avail: u64 = 0;
+            let mut d_total: u64 = 0;
+            let mut d_free: u64 = 0;
+            if GetDiskFreeSpaceExW(d_drive.as_ptr(), &mut d_avail, &mut d_total, &mut d_free) != 0 {
+                total_bytes += d_total;
+            }
+
+            let gb = (total_bytes as f64) / (1024.0 * 1024.0 * 1024.0);
+            if gb >= 900.0 && gb <= 1100.0 {
+                return "1 TB".to_string();
+            } else if gb >= 1800.0 && gb <= 2200.0 {
+                return "2 TB".to_string();
+            } else if gb >= 450.0 && gb <= 550.0 {
+                return "512 GB".to_string();
+            } else if gb >= 220.0 && gb <= 270.0 {
+                return "256 GB".to_string();
+            } else if gb >= 110.0 && gb <= 140.0 {
+                return "128 GB".to_string();
+            } else {
+                return format!("{:.0} GB", gb.round());
+            }
+        }
+    }
+    String::new()
+}
+
+/// Zero-process dynamic RAM capacity detection using Win32 GlobalMemoryStatusEx
+pub fn detect_ram_capacity() -> String {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut mem: MEMORYSTATUSEX = std::mem::zeroed();
+        mem.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if GlobalMemoryStatusEx(&mut mem) != 0 {
+            let gb = (mem.ullTotalPhys as f64) / (1024.0 * 1024.0 * 1024.0);
+            return format!("{:.0} GB RAM", gb.round());
+        }
+    }
+    "8 GB RAM".to_string()
+}
+
+/// Zero-process dynamic processor detection using hardware CPUID instruction
+pub fn detect_processor_name() -> String {
+    let raw = get_cpu_brand();
+    if raw.is_empty() {
+        return "Intel Core Processor".to_string();
+    }
+    let cleaned = raw
+        .replace("(R)", "")
+        .replace("(TM)", "")
+        .replace("CPU @ ", "@")
+        .replace("Dual-Core", "")
+        .replace("Quad-Core", "")
+        .trim()
+        .to_string();
+
+    if let Some(pos) = cleaned.find('@') {
+        cleaned[..pos].trim().to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Zero-process CPUID instruction probe (runs in <1 microsecond, no child processes, zero terminal flashing)

@@ -565,7 +565,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "cp"
-version = "0.0.4"
+version = "0.0.1"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -578,6 +578,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
+ "windows",
  "windows-sys 0.59.0",
  "winreg 0.52.0",
 ]
