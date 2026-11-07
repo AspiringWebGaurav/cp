@@ -6,6 +6,7 @@
   "description": "CP (Copy/Paste) — High-Performance Windows Copy/Paste Replacement Engine",
   "type": "module",
   "scripts": {
+    "setup": "node scripts/vault.mjs unpack && npm run doctor",
     "dev": "node scripts/dev.mjs",
     "dev:frontend": "vite",
     "kill:dev": "node scripts/predev.mjs",

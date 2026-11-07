@@ -69,31 +69,29 @@ cp/
 - **Node.js:** v20+
 - **Rust:** 1.77+ with `msvc` toolchain
 
-### Installation & Development
+### 1-Click Automated Setup (Fresh Machine Setup)
 
 ```bash
 # 1. Clone repository
 git clone https://github.com/AspiringWebGaurav/cp.git
 cd cp
 
-# 2. Install dependencies & verify toolchain
-npm install
-npm run doctor
-
-# 3. Check GPHost cloud storage readiness
-npm run gphost:audit
-
-# 4. Launch local dev environment (supervised native Win32 window)
-npm run dev
+# 2. Run automated setup (installs deps, restores vault, and verifies toolchain)
+Setup.cmd
 ```
+*(Or manually via: `npm install && npm run vault:unpack && npm run doctor`)*
 
-### Vault Recovery (Post-Format Setup)
-
-CP uses an encrypted vault container (`cp-vault.enc`) to restore configuration and offline rules when cloning onto a clean machine:
+### Development & Diagnostics
 
 ```bash
-# Restore workspace configuration (enter master passphrase when prompted)
-npm run vault:unpack
+# Launch local dev environment (supervised native Win32 window)
+npm run dev
+
+# Run comprehensive system diagnostics
+npm run doctor
+
+# Check GPHost cloud storage readiness
+npm run gphost:audit
 ```
 
 ---
