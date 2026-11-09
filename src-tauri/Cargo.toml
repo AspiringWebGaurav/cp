@@ -2,7 +2,9 @@
 name = "cp"
 version = "0.0.1"
 description = "CP (Copy/Paste) — High-Performance Windows Copy/Paste Replacement Engine"
-authors = ["Gaurav Patil"]
+authors = ["Gaurav Patil <https://gauravpatil.site>"]
+homepage = "https://cp.apps.gauravpatil.site"
+license = "MIT"
 edition = "2021"
 
 [lib]
@@ -44,7 +46,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
     "Win32_System_DataExchange",
     "Win32_System_Com",

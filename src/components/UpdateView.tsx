@@ -3,7 +3,7 @@ import { Download, RefreshCw, AlertCircle, Loader2 } from 'lucide-react';
 import type { ReleaseManifest, UpdateDownloadProgress } from '../types';
 
 export type UpdateUIState = 'checking' | 'available' | 'downloading' | 'verifying' | 'ready' | 'restarting' | 'error';
-export type UpdateTriggerReason = 'startup' | 'landing' | 'copy' | 'manual';
+export type UpdateTriggerReason = 'startup' | 'landing' | 'copy' | 'manual' | 'push_broadcast';
 
 interface UpdateViewProps {
   currentVersion: string;
@@ -102,7 +102,7 @@ export const UpdateView: React.FC<UpdateViewProps> = ({
             <div className="flex items-center justify-between text-[12px]">
               <span className="font-semibold text-zinc-800">
                 {state === 'downloading' && 'Downloading update...'}
-                {state === 'verifying' && 'Getting update ready...'}
+                {state === 'verifying' && '⚡ Verifying with Hardware Acceleration (AES-NI)...'}
                 {(state === 'ready' || state === 'restarting') && 'Finishing up, restarting now...'}
               </span>
               <span className="font-mono font-bold text-zinc-900">{percent.toFixed(0)}%</span>
@@ -123,7 +123,11 @@ export const UpdateView: React.FC<UpdateViewProps> = ({
                 {progress?.total_bytes ? formatMb(progress.total_bytes) : (manifest?.size ? formatMb(manifest.size) : '18.4 MB')}
               </span>
               <span>
-                {state === 'downloading' ? (progress?.speed || 'Connecting...') : 'Ready'}
+                {state === 'downloading'
+                  ? (progress?.speed || 'Connecting...')
+                  : state === 'verifying'
+                  ? '⚡ AES-NI Hardware Decryption'
+                  : 'Ready'}
               </span>
             </div>
           </div>

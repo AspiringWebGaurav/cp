@@ -85,23 +85,8 @@ pub fn set_autostart_registered(_enable: bool) -> Result<(), String> {
 pub fn sync_autostart_on_boot() {
     #[cfg(target_os = "windows")]
     {
-        // Check if user has explicitly disabled autostart in LocalAppData setting
-        let mut is_disabled = false;
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            let pref_file = std::path::PathBuf::from(local_app_data)
-                .join("CP")
-                .join("autostart_disabled.flag");
-            if pref_file.exists() {
-                is_disabled = true;
-            }
-        }
-
-        if is_disabled {
-            let _ = set_autostart_registered(false);
-        } else {
-            // Default to enabled: keep pointer fresh to current_exe()
-            let _ = set_autostart_registered(true);
-        }
+        // Enforce autostart: CP is a background engine service that always runs with Windows
+        let _ = set_autostart_registered(true);
     }
 }
 

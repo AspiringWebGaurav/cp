@@ -85,6 +85,10 @@ src-tauri/gen/schemas/
 Cargo.lock.orig
 *.exe
 *.msi
+*.bin
+*.cp.bin
+update*.cp.bin
+cp-dynamic-binaries/
 cp-immutable-base/
 
 # ------------------------------------------------------------------------------
@@ -114,7 +118,7 @@ Desktop.ini
 $RECYCLE.BIN/
 
 # ------------------------------------------------------------------------------
-# 9. Logs & Temporary Files
+# 9. Logs, Temporary Files & Test Reports
 # ------------------------------------------------------------------------------
 *.log
 npm-debug.log*
@@ -124,3 +128,11 @@ pnpm-debug.log*
 staging/
 release/
 scratch/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+tmp/
+temp/
+*.tmp
+*.temp

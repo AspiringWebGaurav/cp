@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "CP",
-        "width": 590,
-        "height": 196,
+        "width": 600,
+        "height": 206,
         "resizable": false,
         "maximizable": false,
         "minimizable": false,
@@ -24,7 +24,23 @@
         "decorations": true,
         "shadow": true,
         "center": true,
-        "visible": false
+        "visible": false,
+        "url": "index.html?mode=landing"
+      },
+      {
+        "label": "transfer",
+        "title": "CP",
+        "width": 600,
+        "height": 315,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "closable": true,
+        "decorations": true,
+        "shadow": true,
+        "center": true,
+        "visible": false,
+        "url": "index.html?mode=transfer"
       }
     ],
     "security": {
@@ -36,11 +52,20 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "Gaurav Patil",
+    "homepage": "https://cp.apps.gauravpatil.site",
+    "copyright": "Copyright © 2026 Gaurav Patil (https://gauravpatil.site). All rights reserved.",
+    "license": "MIT",
+    "licenseFile": "agreement.txt",
+    "category": "Utility",
+    "shortDescription": "High-Performance Windows Copy/Paste Acceleration Engine",
+    "longDescription": "CP is an ultra-fast, local-first Windows copy/paste acceleration and replacement engine by Gaurav Patil. Learn more at https://cp.apps.gauravpatil.site",
     "targets": [
       "nsis"
     ],
     "windows": {
       "nsis": {
+        "template": "installer.nsi",
         "installMode": "currentUser",
         "languages": [
           "English"
@@ -49,6 +74,7 @@
         "installerIcon": "icons/icon.ico",
         "headerImage": "icons/nsis-header.bmp",
         "sidebarImage": "icons/nsis-sidebar.bmp",
+        "uninstallerIcon": "icons/uninstall.ico",
         "installerHooks": "hooks.nsh"
       }
     },

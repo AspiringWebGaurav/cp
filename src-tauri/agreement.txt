@@ -1,0 +1,97 @@
+================================================================================
+GAURAV PATIL - TERMS OF USE & END USER ACCEPTANCE AGREEMENT
+Application: CP (Copy/Paste Engine)
+Author & Developer: Gaurav Patil (https://gauravpatil.site)
+Official Project Hub: https://cp.apps.gauravpatil.site
+License: Permissive Free Software License with Standard Disclaimer
+================================================================================
+
+PLEASE READ THIS ACCEPTANCE AGREEMENT CAREFULLY BEFORE INSTALLING OR USING CP.
+BY PROCEEDING WITH INSTALLATION OR USING THE SOFTWARE, YOU AGREE TO BE BOUND BY
+THE TERMS AND CONDITIONS SET FORTH HEREIN.
+
+1. ACCEPTANCE OF TERMS
+--------------------------------------------------------------------------------
+This End User Acceptance Agreement ("Agreement") constitutes a legal agreement
+between you ("User" or "You") and the developer and author, Gaurav Patil
+("Author"). By downloading, installing, launching, or using the CP desktop
+application ("Software"), you acknowledge that you have read, understood, and
+agreed to all terms of this Agreement. If you do not agree, do not install or use
+the Software.
+
+2. HIGH-PERFORMANCE ARCHITECTURE & OPERATING PARAMETERS
+--------------------------------------------------------------------------------
+CP is a native Windows desktop utility engineered to maximize file transfer
+throughput. To achieve high operational efficiency, the Software utilizes native
+Windows desktop facilities, including:
+  * Win32 Asynchronous I/O Completion Ports (IOCP)
+  * Direct storage subsystem read/write pipeline operations
+  * Multi-threaded concurrent processing queues
+  * Low-overhead Win32 WH_KEYBOARD_LL low-latency clipboard capture
+  * High-throughput sector-aligned streaming pipelines
+
+The Software operates within standard Windows operating system security boundaries
+and executes according to the physical throughput and manufacturer capabilities of
+your system's connected storage media, bus controllers, and system resources.
+
+3. HARDWARE & STORAGE RESPONSIBILITIES
+--------------------------------------------------------------------------------
+Users acknowledge that high-throughput mass file transfers utilize available host
+storage controller bandwidth, memory interfaces, and processing resources as
+permitted by the underlying operating system. Users are responsible for:
+  a) Ensuring the Software is executed on systems and storage devices they own or
+     are authorized to manage;
+  b) Operating their hardware in accordance with manufacturer guidelines,
+     including adequate thermal cooling and ventilation;
+  c) Maintaining regular data backups for all valuable or mission-critical data
+     prior to performing extensive or mass file transfer operations.
+
+4. LIMITATION OF LIABILITY & "AS-IS" DISCLAIMER
+--------------------------------------------------------------------------------
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW:
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITH ALL FAULTS AND
+WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS, IMPLIED, OR STATUTORY, INCLUDING
+BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, TITLE, ACCURACY, AND NON-INFRINGEMENT.
+
+IN NO EVENT SHALL GAURAV PATIL, CONTRIBUTORS, OR DISTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, PUNITIVE, OR CONSEQUENTIAL
+DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, HARDWARE WEAR, STORAGE
+CONTROLLER INTERACTION, SYSTEM REBOOTS, DATA LOSS, CORRUPTION, DELAYS, OR LOSS
+OF BUSINESS PROFITS) ARISING OUT OF THE USE, PERFORMANCE, OR INABILITY TO USE
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+5. 100% LOCAL PRIVACY & DATA SOVEREIGNTY
+--------------------------------------------------------------------------------
+CP is architected on a zero-telemetry, 100% local processing paradigm:
+  * 0 bytes of copied, moved, or transferred files ever leave your machine.
+  * Zero clipboard contents, file paths, directory structures, or file contents
+    are tracked, stored on external servers, or transmitted to the cloud.
+  * Zero tracking cookies, user profiling, identity tokens, or advertising
+    identifiers are embedded in the Software.
+  * All file streaming and buffer management occurs exclusively within local
+    system memory and attached local or network storage devices.
+
+6. CRYPTOGRAPHIC VERIFICATION & UPDATES
+--------------------------------------------------------------------------------
+Executable updates delivered via the official GPHost Global Edge CDN
+(https://gphost.eu.cc) are cryptographically validated using Minisign Ed25519
+digital signatures before execution. The Software incorporates a resilient
+local base anchor and watchdog state recovery to maintain application stability.
+
+7. SYSTEM INTEGRATION & PERMISSIONS
+--------------------------------------------------------------------------------
+To provide convenient background acceleration, the installer provides optional,
+user-controlled system integration settings:
+  * Windows Startup Integration: Allows CP to start minimized in the notification
+    area upon user login for instant copy/paste acceleration.
+  * Desktop & Start Menu Shortcuts: Creates standard access shortcuts.
+  * Golden Base Anchor: Maintains a local recovery snapshot.
+All permissions may be configured during setup and uninstalled cleanly at any
+time via standard Windows "Installed Apps" / "Programs and Features".
+
+================================================================================
+Developer & Author: Gaurav Patil (https://gauravpatil.site)
+Official Project Hub: https://cp.apps.gauravpatil.site
+Copyright (c) 2026 Gaurav Patil. All rights reserved.
+================================================================================

@@ -4,9 +4,18 @@ use tauri::{AppHandle, Emitter, Manager};
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
+static INTERCEPTOR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub fn is_interceptor_active() -> bool {
     HOOK_ACTIVE.load(Ordering::SeqCst)
+}
+
+pub fn is_interceptor_enabled() -> bool {
+    INTERCEPTOR_ENABLED.load(Ordering::SeqCst)
+}
+
+pub fn set_interceptor_enabled(enabled: bool) {
+    INTERCEPTOR_ENABLED.store(enabled, Ordering::SeqCst);
 }
 
 #[cfg(target_os = "windows")]
@@ -81,6 +90,10 @@ unsafe fn low_level_keyboard_proc_inner(
         CallNextHookEx, GetClassNameW, GetForegroundWindow, KBDLLHOOKSTRUCT, WM_KEYDOWN,
     };
 
+    if !is_interceptor_enabled() {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    }
+
     if code >= 0 && (wparam == WM_KEYDOWN as usize) {
         let kbd = *(lparam as *const KBDLLHOOKSTRUCT);
         // VK_V is 0x56
@@ -104,28 +117,30 @@ unsafe fn low_level_keyboard_proc_inner(
                         // Check if clipboard contains file drop list: CF_HDROP (15)
                         const CF_HDROP: u32 = 15;
                         if IsClipboardFormatAvailable(CF_HDROP) != 0 {
-                            // Debounce keystroke autorepeat / duplicate triggers (minimum 1.2s between paste triggers)
+                            // Debounce keystroke autorepeat / duplicate triggers (minimum 700ms between paste triggers)
                             static LAST_INTERCEPT_TIME_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64;
                             let last = LAST_INTERCEPT_TIME_MS.load(Ordering::SeqCst);
-                            if now.saturating_sub(last) < 1200 {
+                            if now.saturating_sub(last) < 700 {
                                 return 1; // Debounce duplicate/repeat keystroke
                             }
                             LAST_INTERCEPT_TIME_MS.store(now, Ordering::SeqCst);
 
                             // SUPPRESS Windows Explorer's built-in paste!
-                            // Store the foreground Explorer HWND *before* showing the CP window
+                            // Store the foreground Explorer HWND *before* anything else
                             // to guarantee accurate active directory lookup in IShellWindows!
                             crate::engine::set_last_explorer_hwnd(hwnd as isize);
 
                             // Trigger CP's high-speed copy transfer immediately!
+                            // Note: Do NOT call win.show() here — the frontend switches to
+                            // pure paste (TransferView) and shows the window only when active files exist.
                             if let Some(app) = APP_HANDLE.get() {
-                                if let Some(win) = app.get_webview_window("main") {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
+                                if let Some(win) = app.get_webview_window("transfer") {
+                                    let _ = win.emit("trigger-auto-paste", ());
+                                } else if let Some(win) = app.get_webview_window("main") {
                                     let _ = win.emit("trigger-auto-paste", ());
                                 }
                             }
