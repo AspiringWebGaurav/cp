@@ -63,6 +63,13 @@ export interface TransferState {
   bytesTransferred: string;
   totalBytes: string;
   eta: string;
+  error?: string | null;
+}
+
+export interface TransferErrorEvent {
+  taskId?: string;
+  fileName?: string;
+  error: string;
 }
 
 export interface ReleaseManifest {

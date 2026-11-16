@@ -831,7 +831,7 @@ Section Install
   ${If} $CheckboxAutoStartState = 1
   ${OrIf} $PassiveMode = 1
   ${OrIf} $UpdateMode = 1
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" '"$INSTDIR\${MAINBINARYNAME}.exe"'
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "${PRODUCTNAME}" '"$INSTDIR\${MAINBINARYNAME}.exe" --autostart'
   ${EndIf}
 
   ; Permission: Desktop Shortcut

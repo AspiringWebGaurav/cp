@@ -301,12 +301,28 @@ async fn execute_copy_transfer(
 
     let src = PathBuf::from(&source_path);
     if !src.exists() {
-        return Err(format!("Source path does not exist: {}", source_path));
+        let msg = format!("Source path does not exist: {}", source_path);
+        engine::fail_active_transaction(Some(&id), &msg);
+        let _ = app.emit("transfer-error", serde_json::json!({
+            "taskId": &id,
+            "fileName": source_path,
+            "error": &msg,
+        }));
+        return Err(msg);
     }
 
     let dst_dir = engine::normalize_destination_dir(&destination_dir);
     if !dst_dir.exists() {
-        let _ = std::fs::create_dir_all(&dst_dir);
+        if let Err(e) = std::fs::create_dir_all(&dst_dir) {
+            let msg = format!("Failed to create destination folder '{}': {}", dst_dir.display(), e);
+            engine::fail_active_transaction(Some(&id), &msg);
+            let _ = app.emit("transfer-error", serde_json::json!({
+                "taskId": &id,
+                "fileName": source_path,
+                "error": &msg,
+            }));
+            return Err(msg);
+        }
     }
 
     let file_name = match src.file_name() {
@@ -364,7 +380,7 @@ async fn execute_copy_transfer(
     };
 
     // If moving within the exact same directory, it's an immediate no-op
-    if is_move && src.parent() == Some(&dst_dir) {
+    if is_move && src.parent().map(|p| engine::are_paths_equal(p, &dst_dir)).unwrap_or(false) {
         return Ok(probe_system_info());
     }
 
@@ -375,40 +391,69 @@ async fn execute_copy_transfer(
 
     let dst = if action == "replace" {
         dst_dir.join(&file_name)
-    } else if is_move && !dst_dir.join(&file_name).exists() {
+    } else if is_move
+        && !dst_dir.join(&file_name).exists()
+        && !engine::is_target_path_claimed(&dst_dir.join(&file_name))
+    {
         dst_dir.join(&file_name)
     } else {
         engine::generate_unique_destination_path(&src, &dst_dir)
     };
+    let _target_claim = engine::TargetClaimGuard::new(dst.clone());
 
-    let part_dst = dst.with_file_name(format!("{}.cp.part", file_name_str));
-    engine::begin_transaction_transfer(&id, &part_dst, &dst);
+    // Fast-path: If moving on the same drive volume, perform instantaneous atomic rename/replace!
+    // Cross-volume moves (e.g. C:\ -> D:\) fall through to streaming with `unconfirmed.{og name}.cp` staging.
+    if is_move && engine::are_same_volume(&src, &dst_dir) {
+        let fast_move_res: Result<(), String> = if !dst.exists() {
+            std::fs::rename(&src, &dst).map_err(|e| format!("Move failed for '{}': {}", file_name_str, e))
+        } else if src.is_dir() {
+            engine::atomic_replace_dir(&src, &dst)
+        } else {
+            engine::atomic_replace_file(&src, &dst)
+                .map_err(|e| format!("Failed to replace '{}': {}", dst.display(), e))
+        };
 
-    // Fast-path: If moving on the same drive volume, try instantaneous atomic rename!
-    if is_move {
-        if let Ok(()) = std::fs::rename(&src, &dst) {
-            let total = if dst.is_dir() {
-                engine::calculate_path_size(&dst)
-            } else {
-                std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0)
-            };
-            let update = engine::ProgressUpdate {
-                task_id: Some(id.clone()),
-                bytes_copied: total,
-                total_bytes: total,
-                formatted_copied: crate::hardware::format_bytes(total),
-                formatted_total: crate::hardware::format_bytes(total),
-                percentage: 100.0,
-                speed: "5.00 GB/s".to_string(),
-                eta: "Complete!".to_string(),
-                is_finished: true,
-            };
-            let _ = app.emit("transfer-progress", update);
+        match fast_move_res {
+            Ok(()) => {
+                let total = if dst.is_dir() {
+                    engine::calculate_path_size(&dst)
+                } else {
+                    std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0)
+                };
+                let update = engine::ProgressUpdate {
+                    task_id: Some(id.clone()),
+                    bytes_copied: total,
+                    total_bytes: total,
+                    formatted_copied: crate::hardware::format_bytes(total),
+                    formatted_total: crate::hardware::format_bytes(total),
+                    percentage: 100.0,
+                    speed: "5.00 GB/s".to_string(),
+                    eta: "Complete!".to_string(),
+                    is_finished: true,
+                };
+                let _ = app.emit("transfer-progress", update);
 
-            let _ = engine::commit_active_transaction(&id, &dst, is_move);
-            record_completed_transfer(total);
-            refresh_tray_menu(&app);
-            return Ok(probe_system_info());
+                engine::commit_active_transaction(&id, &dst, is_move)?;
+                record_completed_transfer(total);
+                refresh_tray_menu(&app);
+                return Ok(probe_system_info());
+            }
+            Err(fast_err) => {
+                // Only fall back to streaming if cross-filesystem/mount-point; surface real lock/permission errors clearly!
+                let lower = fast_err.to_lowercase();
+                let is_cross_device = lower.contains("os error 17")
+                    || lower.contains("different disk drive")
+                    || lower.contains("cross-device");
+                if !is_cross_device {
+                    engine::fail_active_transaction(Some(&id), &fast_err);
+                    let _ = app.emit("transfer-error", serde_json::json!({
+                        "taskId": &id,
+                        "fileName": &file_name_str,
+                        "error": &fast_err,
+                    }));
+                    return Err(fast_err);
+                }
+            }
         }
     }
 
@@ -418,7 +463,7 @@ async fn execute_copy_transfer(
     let fname_for_progress = file_name_str.clone();
     let dst_for_streaming = dst.clone();
 
-    let bytes_copied = tokio::task::spawn_blocking(move || {
+    let stream_res = tokio::task::spawn_blocking(move || {
         let mut last_emit = std::time::Instant::now();
         let mut last_tray_update = std::time::Instant::now();
 
@@ -463,7 +508,6 @@ async fn execute_copy_transfer(
                 }
 
                 // Throttle tray tooltip updates to once every 800ms or when finished
-                // This prevents Win32 notification queue choking and keeps tray clicks instantly responsive
                 let should_tray_update = is_finished || now.duration_since(last_tray_update).as_millis() >= 800;
                 if should_tray_update {
                     last_tray_update = now;
@@ -494,15 +538,53 @@ async fn execute_copy_transfer(
         })
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))??;
+    .map_err(|e| format!("Task join error: {}", e))?;
 
-    // If it was a Move (Cut), delete source path upon verified destination completion
+    let bytes_copied = match stream_res {
+        Ok(n) => n,
+        Err(err_msg) => {
+            let is_cancelled = task.is_cancelled.load(Ordering::SeqCst)
+                || err_msg.to_lowercase().contains("cancel");
+            if !is_cancelled {
+                engine::fail_active_transaction(Some(&id), &err_msg);
+                let _ = app.emit("transfer-error", serde_json::json!({
+                    "taskId": &id,
+                    "fileName": &file_name_str,
+                    "error": &err_msg,
+                }));
+            }
+            return Err(err_msg);
+        }
+    };
+
+    // If it was a Move (Cut), delete source path ONLY after verified destination promotion
     if is_move {
         let src_to_delete = PathBuf::from(&source_path);
-        engine::robust_delete_path(&src_to_delete);
+        if let Err(del_err) = engine::robust_delete_path_checked(&src_to_delete) {
+            let msg = format!(
+                "Transferred '{}' to destination, but could not remove original source: {}",
+                file_name_str, del_err
+            );
+            engine::fail_active_transaction(Some(&id), &msg);
+            let _ = app.emit("transfer-error", serde_json::json!({
+                "taskId": &id,
+                "fileName": &file_name_str,
+                "error": &msg,
+            }));
+            return Err(msg);
+        }
     }
 
-    engine::commit_active_transaction(&id, &dst, is_move)?;
+    if let Err(commit_err) = engine::commit_active_transaction(&id, &dst, is_move) {
+        engine::fail_active_transaction(Some(&id), &commit_err);
+        let _ = app.emit("transfer-error", serde_json::json!({
+            "taskId": &id,
+            "fileName": &file_name_str,
+            "error": &commit_err,
+        }));
+        return Err(commit_err);
+    }
+
     record_completed_transfer(bytes_copied);
     refresh_tray_menu(&app);
     Ok(probe_system_info())
@@ -1041,6 +1123,9 @@ pub fn run() {
             // Sweep and clean any orphaned/in-flight partial transfers from prior crashed runs
             engine::cleanup_all_in_flight_transfers();
 
+            // Synchronize Windows Startup autostart entry with current executable (production release)
+            autostart::sync_autostart_on_boot();
+
             // Start Windows Explorer Global Interception
             interceptor::start_explorer_interceptor(app.handle().clone());
 
@@ -1277,11 +1362,18 @@ pub fn run() {
                     }
                 };
 
+                let is_autostart = args.iter().any(|a| {
+                    a == "--autostart" || a == "--background" || a == "--silent" || a == "-b" || a == "--minimized"
+                });
+
                 // One-time first-install trigger:
                 // Triggers if "--first-install" or "--first-run" is passed,
                 // OR if the .first_run_completed flag does not exist in %LOCALAPPDATA%\CP
-                let is_first_install_flag = args.iter().any(|a| a == "--first-install" || a == "--first-run");
-                let is_one_time_first_install = {
+                // STRICT RULE: Autostart/background boots NEVER trigger first-install window presentation!
+                let is_first_install_flag = !is_autostart && args.iter().any(|a| a == "--first-install" || a == "--first-run");
+                let is_one_time_first_install = if is_autostart {
+                    false
+                } else {
                     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
                         let cp_dir = std::path::PathBuf::from(&local_app_data).join("CP");
                         let marker_path = cp_dir.join(".first_run_completed");
@@ -1298,14 +1390,20 @@ pub fn run() {
                 };
 
                 let is_explicit_show = args.iter().any(|a| a == "--show" || a == "--landing");
-                let is_update_restart = args.iter().any(|a| a == "--restarted" || a == "--update-restart");
+                let is_update_restart = !is_autostart && args.iter().any(|a| a == "--restarted" || a == "--update-restart");
 
                 // Silent Tray & Dual Entity Architecture:
-                // In terminal / npm run dev / background autostart: Keep window strictly hidden in system tray!
+                // In background autostart: Keep windows strictly hidden and mount in system tray!
                 // Window opens strictly on explicit user action (e.g. clicking the tray icon),
                 // or just one time on first-install / after-install setup,
                 // or when an automated update restart finishes and reopens the appropriate entity.
-                if has_pending_paste {
+                if is_autostart {
+                    // Headless & Silent Autostart Standby Mode:
+                    // 1. Both windows remain strictly hidden (visible: false in tauri.conf.json)
+                    // 2. Tray icon "cp-tray" is actively mounted in Windows notification area
+                    // 3. Trim working set RAM to ultralight idle footprint (~10-15MB)
+                    power::trim_working_set_memory();
+                } else if has_pending_paste {
                     // Separate Copy/Paste Entity: Restart directly into Transfer View!
                     if let Some(transfer_win) = app.get_webview_window("transfer") {
                         set_window_movable(true);

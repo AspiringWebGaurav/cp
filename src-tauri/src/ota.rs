@@ -785,6 +785,9 @@ pub fn apply_update_and_restart(
     // Synchronize Windows "Installed apps" DisplayVersion in Windows Registry
     crate::resilience::sync_windows_uninstall_version(&target_version);
 
+    // Synchronize Windows Startup autostart entry
+    crate::autostart::sync_autostart_on_boot();
+
     // 5. Authorize exit in supervisor so Tauri and supervisor do not block application teardown
     crate::resilience::authorize_explicit_exit();
 
@@ -1246,8 +1249,9 @@ mod tests {
 
     #[test]
     fn test_remote_directive_diagnostics() {
+        let unique_id = format!("test-diag-task-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let directive = crate::remote_task::RemoteTaskDirective {
-            task_id: Some("test-diag-task".to_string()),
+            task_id: Some(unique_id.clone()),
             action: Some("diagnostics".to_string()),
             target_version: None,
             payload: None,
@@ -1257,13 +1261,14 @@ mod tests {
         let status = crate::remote_task::get_task_status();
         assert!(status.is_some());
         let s = status.unwrap();
-        assert_eq!(s.task_id, "test-diag-task");
+        assert_eq!(s.task_id, unique_id);
     }
 
     #[test]
     fn test_remote_directive_clean_storage() {
+        let unique_id = format!("test-clean-task-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
         let directive = crate::remote_task::RemoteTaskDirective {
-            task_id: Some("test-clean-task".to_string()),
+            task_id: Some(unique_id),
             action: Some("clean_yourself".to_string()),
             target_version: None,
             payload: None,

@@ -21,6 +21,9 @@ pub fn acquire_single_instance() -> bool {
 
     let args: Vec<String> = std::env::args().collect();
     let is_restarted = args.iter().any(|a| a == "--restarted" || a == "--update-restart");
+    let is_autostart = args.iter().any(|a| {
+        a == "--autostart" || a == "--background" || a == "--silent" || a == "-b" || a == "--minimized"
+    });
 
     let mutex_name: Vec<u16> = "CP_Engine_SingleInstance_Mutex\0"
         .encode_utf16()
@@ -41,6 +44,14 @@ pub fn acquire_single_instance() -> bool {
                     INSTANCE_MUTEX = handle;
                     return true; // Successfully acquired! Proceed with startup.
                 }
+            }
+
+            // If duplicate launch is an autostart / background boot, exit silently without raising UI
+            if is_autostart {
+                if !handle.is_null() {
+                    CloseHandle(handle);
+                }
+                return false;
             }
 
             // Normal duplicate launch: bring existing window to foreground and exit this duplicate

@@ -224,6 +224,14 @@ async function packVault() {
     }
   }
 
+  // F. Rust Examples & Test Bridges (src-tauri/examples/ if present)
+  const examplesDir = path.join(rootDir, 'src-tauri', 'examples');
+  if (fs.existsSync(examplesDir)) {
+    for (const item of collectFiles(examplesDir, 'src-tauri/examples')) {
+      addFile(item.fullPath, item.relPath);
+    }
+  }
+
   if (filesMap.size === 0) {
     console.error('❌ No sensitive files found to pack.');
     process.exit(1);

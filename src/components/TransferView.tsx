@@ -1,4 +1,4 @@
-import { ArrowRight, Play, Pause, X, Zap, HardDrive, Clock, Minus, FolderOpen } from 'lucide-react';
+import { ArrowRight, Play, Pause, X, Zap, HardDrive, Clock, Minus, FolderOpen, AlertTriangle, RotateCcw } from 'lucide-react';
 import type { TransferState } from '../types';
 import { MarqueeText } from './MarqueeText';
 
@@ -8,6 +8,8 @@ interface TransferViewProps {
   onCancel: () => void;
   onMinimize: () => void;
   onOpenDestination?: (path: string) => void;
+  onRetry?: () => void;
+  onDismissError?: () => void;
 }
 
 export function TransferView({
@@ -16,10 +18,13 @@ export function TransferView({
   onCancel,
   onMinimize,
   onOpenDestination,
+  onRetry,
+  onDismissError,
 }: TransferViewProps) {
   const isHolding =
     Boolean(transfer.speed?.toLowerCase().includes('holding')) ||
     Boolean(transfer.eta?.toLowerCase().includes('updating'));
+  const hasError = Boolean(transfer.error);
 
   return (
     <div className="flex flex-col justify-between h-full font-sans select-none">
@@ -68,7 +73,9 @@ export function TransferView({
         <div className="flex items-center justify-between text-[10.5px]">
           <span
             className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
-              isHolding
+              hasError
+                ? 'bg-rose-100 text-rose-900 border border-rose-300 shadow-2xs'
+                : isHolding
                 ? 'bg-amber-100 text-amber-900 border border-amber-300 shadow-2xs'
                 : transfer.isPaused
                 ? 'bg-amber-100 text-amber-900 border border-amber-300'
@@ -79,7 +86,9 @@ export function TransferView({
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
-                isHolding
+                hasError
+                  ? 'bg-rose-600'
+                  : isHolding
                   ? 'bg-amber-500 animate-pulse'
                   : transfer.isPaused
                   ? 'bg-amber-500'
@@ -88,7 +97,9 @@ export function TransferView({
                   : 'bg-emerald-500 animate-pulse'
               }`}
             />
-            {isHolding
+            {hasError
+              ? 'Transfer Failed'
+              : isHolding
               ? 'HOLDING FOR UPDATE'
               : transfer.isPaused
               ? 'Paused'
@@ -117,90 +128,132 @@ export function TransferView({
         <div className="w-full bg-zinc-100/90 rounded-lg h-5 border border-zinc-200/90 shadow-inner relative overflow-hidden p-[1.5px] transform-gpu">
           <div
             className={`h-full rounded-md transition-[width] duration-200 ease-out relative overflow-hidden transform-gpu will-change-[width] ${
-              isHolding || transfer.isPaused
+              hasError
+                ? 'bg-gradient-to-r from-rose-600 via-rose-500 to-rose-400 shadow-[0_0_12px_rgba(244,63,94,0.35)]'
+                : isHolding || transfer.isPaused
                 ? 'bg-gradient-to-r from-amber-500 via-amber-400 to-yellow-400 shadow-[0_0_12px_rgba(245,158,11,0.35)]'
                 : 'bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-400 shadow-[0_0_12px_rgba(16,185,129,0.35)]'
             }`}
-            style={{ width: isHolding ? '100%' : `${Math.max(1, Math.min(100, transfer.progress))}%` }}
+            style={{ width: isHolding ? '100%' : `${Math.max(hasError ? 100 : 1, Math.min(100, transfer.progress))}%` }}
           >
             {/* Top Gloss Highlight */}
             <div className="absolute inset-x-0 top-0 h-[45%] bg-gradient-to-b from-white/30 to-transparent pointer-events-none" />
-            {(!transfer.isPaused || isHolding) && (
+            {!hasError && (!transfer.isPaused || isHolding) && (
               <div className="absolute inset-0 cp-shimmer-overlay pointer-events-none transform-gpu" />
             )}
           </div>
           <span className="absolute inset-0 flex items-center justify-center font-mono font-extrabold text-[10.5px] text-zinc-900 pointer-events-none select-none drop-shadow-[0_1px_1px_rgba(255,255,255,0.85)] tracking-tight">
-            {isHolding
+            {hasError
+              ? `Failed (${transfer.progress.toFixed(1)}%)`
+              : isHolding
               ? 'HOLDING • UPDATING ENGINE BEFORE PASTE'
               : `${transfer.progress.toFixed(1)}% ${transfer.isPaused ? '(Paused)' : ''}`}
           </span>
         </div>
 
-        {/* 4. Telemetry Metrics Strip (Hardware-Accelerated Speed & Throughput HUD) */}
-        <div className="bg-gradient-to-r from-zinc-50 via-zinc-100/60 to-zinc-50 border border-zinc-200/80 rounded-lg px-2.5 py-1.5 flex items-center justify-between text-[10.5px] font-mono shadow-2xs">
-          <span className="flex items-center gap-1.5 min-w-0">
-            <span className={`p-0.5 rounded ${isHolding || transfer.isPaused ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600 animate-pulse'}`}>
-              <Zap className="w-3 h-3 shrink-0" />
+        {/* 4. Error Notice OR Telemetry Metrics Strip */}
+        {hasError ? (
+          <div
+            role="alert"
+            title={transfer.error || 'Transfer failed'}
+            className="bg-rose-50 border border-rose-200/90 rounded-lg px-2.5 py-1.5 flex items-center gap-2 text-[10.5px] shadow-2xs min-w-0"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+            <span className="text-rose-900 font-semibold truncate flex-1 select-text">
+              {transfer.error}
             </span>
-            <strong className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Speed:</strong>
-            <span className={`font-mono font-extrabold text-[11px] tracking-tight ${isHolding || transfer.isPaused ? 'text-amber-600' : 'text-emerald-600'}`}>
-              {transfer.isPaused ? 'Paused' : transfer.speed}
+          </div>
+        ) : (
+          <div className="bg-gradient-to-r from-zinc-50 via-zinc-100/60 to-zinc-50 border border-zinc-200/80 rounded-lg px-2.5 py-1.5 flex items-center justify-between text-[10.5px] font-mono shadow-2xs">
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span className={`p-0.5 rounded ${isHolding || transfer.isPaused ? 'bg-amber-100 text-amber-600' : 'bg-emerald-100 text-emerald-600 animate-pulse'}`}>
+                <Zap className="w-3 h-3 shrink-0" />
+              </span>
+              <strong className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">Speed:</strong>
+              <span className={`font-mono font-extrabold text-[11px] tracking-tight ${isHolding || transfer.isPaused ? 'text-amber-600' : 'text-emerald-600'}`}>
+                {transfer.isPaused ? 'Paused' : transfer.speed}
+              </span>
             </span>
-          </span>
-          <span className="flex items-center gap-1.5 min-w-0 text-zinc-600">
-            <HardDrive className="w-3 h-3 text-zinc-400 shrink-0" />
-            <span className="text-zinc-800 font-bold">{transfer.bytesTransferred}</span>
-            <span className="text-zinc-400 font-normal">/ {transfer.totalBytes}</span>
-          </span>
-          <span className="flex items-center gap-1.5 min-w-0">
-            <Clock className="w-3 h-3 text-zinc-400 shrink-0" />
-            <strong className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">ETA:</strong>
-            <span className={`font-mono font-bold ${isHolding || transfer.isPaused ? 'text-amber-600' : 'text-zinc-900'}`}>
-              {transfer.isPaused ? 'Paused' : transfer.eta}
+            <span className="flex items-center gap-1.5 min-w-0 text-zinc-600">
+              <HardDrive className="w-3 h-3 text-zinc-400 shrink-0" />
+              <span className="text-zinc-800 font-bold">{transfer.bytesTransferred}</span>
+              <span className="text-zinc-400 font-normal">/ {transfer.totalBytes}</span>
             </span>
-          </span>
-        </div>
+            <span className="flex items-center gap-1.5 min-w-0">
+              <Clock className="w-3 h-3 text-zinc-400 shrink-0" />
+              <strong className="text-zinc-500 text-[10px] uppercase font-bold tracking-wider">ETA:</strong>
+              <span className={`font-mono font-bold ${isHolding || transfer.isPaused ? 'text-amber-600' : 'text-zinc-900'}`}>
+                {transfer.isPaused ? 'Paused' : transfer.eta}
+              </span>
+            </span>
+          </div>
+        )}
       </div>
 
       {/* 5. Cohesive Action Controls */}
       <div className="border-t border-zinc-200/80 pt-1.5 pb-0.5 flex items-center justify-end gap-1.5 shrink-0">
-        <button
-          onClick={onMinimize}
-          title="Minimize transfer window to background system tray"
-          className="px-2.5 py-1 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 hover:text-zinc-900 border border-zinc-300 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all shadow-2xs active:scale-[0.98]"
-        >
-          <Minus className="w-3 h-3" />
-          Minimize
-        </button>
-        {!isHolding && (
-          <button
-            onClick={onTogglePause}
-            className={`px-3 py-1 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all border shadow-2xs active:scale-[0.98] ${
-              transfer.isPaused
-                ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-400 shadow-amber-100/50'
-                : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-800 border-zinc-300'
-            }`}
-          >
-            {transfer.isPaused ? (
-              <>
-                <Play className="w-3 h-3 text-amber-600 fill-amber-600" />
-                Resume
-              </>
-            ) : (
-              <>
-                <Pause className="w-3 h-3 text-amber-600 fill-amber-600" />
-                Pause
-              </>
+        {hasError ? (
+          <>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white border border-emerald-600 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all shadow-2xs active:scale-[0.98]"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Retry
+              </button>
             )}
-          </button>
+            <button
+              type="button"
+              onClick={onDismissError || onCancel}
+              className="px-2.5 py-1 bg-zinc-100 hover:bg-rose-50 text-rose-700 hover:text-rose-800 border border-zinc-300 hover:border-rose-300 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all shadow-2xs active:scale-[0.98]"
+            >
+              <X className="w-3 h-3" />
+              Close
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={onMinimize}
+              title="Minimize transfer window to background system tray"
+              className="px-2.5 py-1 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 hover:text-zinc-900 border border-zinc-300 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all shadow-2xs active:scale-[0.98]"
+            >
+              <Minus className="w-3 h-3" />
+              Minimize
+            </button>
+            {!isHolding && (
+              <button
+                onClick={onTogglePause}
+                className={`px-3 py-1 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all border shadow-2xs active:scale-[0.98] ${
+                  transfer.isPaused
+                    ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border-amber-400 shadow-amber-100/50'
+                    : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-800 border-zinc-300'
+                }`}
+              >
+                {transfer.isPaused ? (
+                  <>
+                    <Play className="w-3 h-3 text-amber-600 fill-amber-600" />
+                    Resume
+                  </>
+                ) : (
+                  <>
+                    <Pause className="w-3 h-3 text-amber-600 fill-amber-600" />
+                    Pause
+                  </>
+                )}
+              </button>
+            )}
+            <button
+              onClick={onCancel}
+              className="px-2.5 py-1 bg-zinc-100 hover:bg-rose-50 text-rose-700 hover:text-rose-800 border border-zinc-300 hover:border-rose-300 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all shadow-2xs active:scale-[0.98]"
+            >
+              <X className="w-3 h-3" />
+              Cancel
+            </button>
+          </>
         )}
-        <button
-          onClick={onCancel}
-          className="px-2.5 py-1 bg-zinc-100 hover:bg-rose-50 text-rose-700 hover:text-rose-800 border border-zinc-300 hover:border-rose-300 font-semibold rounded text-[10.5px] flex items-center gap-1 cursor-pointer transition-all shadow-2xs active:scale-[0.98]"
-        >
-          <X className="w-3 h-3" />
-          Cancel
-        </button>
       </div>
     </div>
   );

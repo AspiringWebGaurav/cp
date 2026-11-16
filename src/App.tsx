@@ -7,7 +7,7 @@ import { TransferView } from './components/TransferView';
 import { ConflictView } from './components/ConflictView';
 import { type UpdateUIState, type UpdateTriggerReason } from './components/UpdateView';
 import { tauriApi } from './services/tauriApi';
-import type { SystemInfo, ClipboardFileInfo, TransferState, ProgressUpdate, ReleaseManifest, UpdateDownloadProgress, ConflictAction, FileConflictInfo } from './types';
+import type { SystemInfo, ClipboardFileInfo, TransferState, ProgressUpdate, ReleaseManifest, UpdateDownloadProgress, ConflictAction, FileConflictInfo, TransferErrorEvent } from './types';
 
 export default function App() {
   const [currentVersion, setCurrentVersion] = useState<string>(() => {
@@ -145,6 +145,12 @@ export default function App() {
   const activeTabRef = useRef<'status' | 'transfer' | 'update' | 'conflict'>(activeTab);
   const focusedTaskIdRef = useRef<string | null>(null);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasTransferErrorRef = useRef(false);
+  const lastTransferRequestRef = useRef<{
+    target: ClipboardFileInfo;
+    conflictDecisions: Record<string, ConflictAction>;
+    startIndex: number;
+  } | null>(null);
 
   const clearHideTimeout = () => {
     if (hideTimeoutRef.current !== null) {
@@ -173,6 +179,7 @@ export default function App() {
     updateReasonRef.current = updateReason;
     activeTabRef.current = activeTab;
     focusedTaskIdRef.current = focusedTaskId;
+    hasTransferErrorRef.current = Boolean(transfer.error);
   }, [updateManifest, updateState, updateReason, activeTab, focusedTaskId, transfer, activeTasks]);
 
   useEffect(() => {
@@ -477,6 +484,7 @@ export default function App() {
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
     let unlistenProgress: (() => void) | undefined;
+    let unlistenTransferError: (() => void) | undefined;
     let unlistenFocusTask: (() => void) | undefined;
     let unlistenTaskCancelled: (() => void) | undefined;
     let unlistenTaskPaused: (() => void) | undefined;
@@ -499,6 +507,7 @@ export default function App() {
                   speed: data.speed,
                   eta: data.isFinished ? 'Complete!' : data.eta,
                   isActive: !data.isFinished,
+                  error: null,
                 };
               }
               return t;
@@ -519,6 +528,7 @@ export default function App() {
                 bytesTransferred: data.formattedCopied,
                 totalBytes: data.formattedTotal,
                 eta: data.isFinished ? 'Complete!' : data.eta,
+                error: null,
               },
             ];
           }
@@ -542,11 +552,41 @@ export default function App() {
               speed: data.speed,
               eta: data.isFinished ? 'Complete!' : data.eta,
               isActive: !data.isFinished,
+              error: null,
             };
           }
           return prev;
         });
       }).then((u) => { unlistenProgress = u; }).catch(() => {});
+
+      listen<TransferErrorEvent>('transfer-error', (event) => {
+        const payload = event.payload;
+        if (!payload?.error) return;
+        const targetId = payload.taskId;
+        clearHideTimeout();
+        hasTransferErrorRef.current = true;
+        setActiveTasks((prev) =>
+          prev.map((t) =>
+            !targetId || t.taskId === targetId
+              ? { ...t, isActive: false, isPaused: false, speed: 'Failed', eta: 'Error', error: payload.error }
+              : t
+          )
+        );
+        setTransfer((prev) => {
+          if (!targetId || !prev.taskId || prev.taskId === targetId || focusedTaskIdRef.current === targetId) {
+            return {
+              ...prev,
+              isActive: false,
+              isPaused: false,
+              speed: 'Failed',
+              eta: 'Error',
+              error: payload.error,
+            };
+          }
+          return prev;
+        });
+        tauriApi.showTransferWindow().catch(() => {});
+      }).then((u) => { unlistenTransferError = u; }).catch(() => {});
 
       // Listen to focus-task event from task tray icon click
       listen<string>('focus-task', (event) => {
@@ -569,7 +609,7 @@ export default function App() {
       // Listen to task-cancelled event from task tray context menu or backend
       listen<string>('task-cancelled', (event) => {
         const targetId = event.payload;
-        handleTaskCompletedOrCancelled(targetId);
+        handleTaskCompletedOrCancelled(targetId, true);
       }).then((u) => { unlistenTaskCancelled = u; }).catch(() => {});
 
       // Listen to task-paused-changed event from task tray context menu
@@ -631,7 +671,11 @@ export default function App() {
       }
 
       if (e.key === 'Escape' && activeTabRef.current === 'transfer') {
-        handleCancelTransfer();
+        if (hasTransferErrorRef.current) {
+          handleDismissError();
+        } else {
+          handleCancelTransfer();
+        }
       }
     };
 
@@ -657,6 +701,7 @@ export default function App() {
       if (unlistenShowConsole) unlistenShowConsole();
       if (unlistenTriggerCheck) unlistenTriggerCheck();
       if (unlistenProgress) unlistenProgress();
+      if (unlistenTransferError) unlistenTransferError();
       if (unlistenFocusTask) unlistenFocusTask();
       if (unlistenTaskCancelled) unlistenTaskCancelled();
       if (unlistenTaskPaused) unlistenTaskPaused();
@@ -675,7 +720,19 @@ export default function App() {
           setTransfer(next);
         }
       } else {
-        setTransfer((p) => ({ ...p, isActive: false, progress: 0 }));
+        if (isCancel) {
+          setTransfer((p) => ({ ...p, isActive: false, isPaused: false, progress: 0, error: null }));
+        } else {
+          setTransfer((p) => ({
+            ...p,
+            isActive: false,
+            isPaused: false,
+            progress: 100,
+            eta: 'Complete!',
+            error: null,
+          }));
+        }
+        hasTransferErrorRef.current = false;
         setFocusedTaskId(null);
         if (typeof window !== 'undefined') {
           sessionStorage.removeItem('cp_active_transfer');
@@ -693,6 +750,7 @@ export default function App() {
           clearHideTimeout();
           hideTimeoutRef.current = setTimeout(async () => {
             await tauriApi.hideWindow().catch(() => {});
+            setTransfer((p) => ({ ...p, progress: 0 }));
             refreshTelemetry();
             hideTimeoutRef.current = null;
           }, 800);
@@ -708,12 +766,15 @@ export default function App() {
   const startActualTransfer = async (
     target: ClipboardFileInfo,
     conflictDecisions: Record<string, ConflictAction>,
-    skipUpdateCheck = false
+    skipUpdateCheck = false,
+    startIndex = 0
   ) => {
     // Transactional State Reset: Ensure clean slate for transfer execution
     setConflicts([]);
     pendingPasteTargetRef.current = null;
     conflictDecisionsRef.current = {};
+    hasTransferErrorRef.current = false;
+    lastTransferRequestRef.current = { target, conflictDecisions, startIndex };
     if (typeof window !== 'undefined') {
       if (sessionStorage.getItem('cp_last_tab') === 'conflict') {
         sessionStorage.setItem('cp_last_tab', 'transfer');
@@ -732,7 +793,8 @@ export default function App() {
     }
 
     const destDir = target.activeExplorerPath || 'C:\\';
-    const firstSrc = target.filePaths[0];
+    const firstIdx = Math.min(startIndex, Math.max(0, target.filePaths.length - 1));
+    const firstSrc = target.filePaths[firstIdx];
     const firstFileName = firstSrc.split(/[/\\]/).pop() || target.primaryName;
     const taskId = 'task-' + Date.now();
 
@@ -747,12 +809,13 @@ export default function App() {
       isCut: target.isCut,
       source: firstSrc,
       destination: destDir,
-      currentFile: target.filePaths.length > 1 ? `(1/${target.filePaths.length}) ${firstFileName}` : firstFileName,
+      currentFile: target.filePaths.length > 1 ? `(${firstIdx + 1}/${target.filePaths.length}) ${firstFileName}` : firstFileName,
       progress: 0,
       speed: hasKnownUpdate ? 'Holding for update...' : 'Starting...',
       bytesTransferred: '0 B',
       totalBytes: target.formattedSize,
       eta: hasKnownUpdate ? `Updating to v${knownUpdate?.version}...` : 'Calculating...',
+      error: null,
     };
 
     // 1. Force synchronous DOM switch to 'transfer' BEFORE window is revealed
@@ -819,7 +882,7 @@ export default function App() {
     }
 
     try {
-      for (let i = 0; i < target.filePaths.length; i++) {
+      for (let i = startIndex; i < target.filePaths.length; i++) {
         if (isUpdatingInProgress.current || updateReasonRef.current === 'copy') {
           break;
         }
@@ -830,6 +893,7 @@ export default function App() {
           continue;
         }
 
+        lastTransferRequestRef.current = { target, conflictDecisions, startIndex: i };
         const fileName = src.split(/[/\\]/).pop() || target.primaryName;
 
         setTransfer((prev) => ({
@@ -838,6 +902,7 @@ export default function App() {
           destination: destDir,
           isCut: target.isCut,
           currentFile: target.filePaths.length > 1 ? `(${i + 1}/${target.filePaths.length}) ${fileName}` : fileName,
+          error: null,
         }));
         setActiveTasks((prev) =>
           prev.map((t) =>
@@ -847,6 +912,7 @@ export default function App() {
                   source: src,
                   destination: destDir,
                   currentFile: target.filePaths.length > 1 ? `(${i + 1}/${target.filePaths.length}) ${fileName}` : fileName,
+                  error: null,
                 }
               : t
           )
@@ -860,17 +926,74 @@ export default function App() {
       }
 
       if (!isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
+        lastTransferRequestRef.current = null;
         handleTaskCompletedOrCancelled(taskId);
       }
     } catch (err: any) {
-      console.warn('Transfer completed, canceled, or stopped:', err);
-      const isCancelled = String(err).toLowerCase().includes('cancel');
-      if (!isCancelled && !isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
-        handleTaskCompletedOrCancelled(taskId);
+      const errorMessage =
+        typeof err === 'string'
+          ? err
+          : err?.message || String(err || 'Unexpected transfer error');
+      const isCancelled = errorMessage.toLowerCase().includes('cancel');
+      if (isCancelled) {
+        if (!isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
+          handleTaskCompletedOrCancelled(taskId, true);
+        }
+      } else if (!isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
+        console.error('Transfer failed:', errorMessage);
+        clearHideTimeout();
+        hasTransferErrorRef.current = true;
+        setActiveTasks((prev) =>
+          prev.map((t) =>
+            t.taskId === taskId
+              ? { ...t, isActive: false, isPaused: false, speed: 'Failed', eta: 'Error', error: errorMessage }
+              : t
+          )
+        );
+        setTransfer((prev) => ({
+          ...prev,
+          isActive: false,
+          isPaused: false,
+          speed: 'Failed',
+          eta: 'Error',
+          error: errorMessage,
+        }));
+        tauriApi.showTransferWindow().catch(() => {});
       }
     } finally {
       isPastingInProgressRef.current = false;
     }
+  };
+
+  const handleRetryTransfer = () => {
+    const req = lastTransferRequestRef.current;
+    if (!req) return;
+    hasTransferErrorRef.current = false;
+    lastPasteTimeRef.current = 0;
+    startActualTransfer(req.target, req.conflictDecisions, true, req.startIndex);
+  };
+
+  const handleDismissError = async () => {
+    clearHideTimeout();
+    hasTransferErrorRef.current = false;
+    lastTransferRequestRef.current = null;
+    lastPasteTimeRef.current = 0;
+    setConflicts([]);
+    pendingPasteTargetRef.current = null;
+    conflictDecisionsRef.current = {};
+    setActiveTasks([]);
+    setFocusedTaskId(null);
+    setTransfer((p) => ({ ...p, isActive: false, isPaused: false, progress: 0, error: null }));
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem('cp_active_transfer');
+      sessionStorage.removeItem('cp_active_tasks');
+      sessionStorage.removeItem('cp_focused_task_id');
+      if (!isTransferWindow) {
+        sessionStorage.setItem('cp_last_tab', 'status');
+      }
+    }
+    await tauriApi.hideWindow().catch(() => {});
+    refreshTelemetry();
   };
 
   const handleResolveConflict = (action: ConflictAction, applyToAll: boolean) => {
@@ -966,6 +1089,8 @@ export default function App() {
   const handleCancelTransfer = async () => {
     clearHideTimeout();
     lastPasteTimeRef.current = 0;
+    hasTransferErrorRef.current = false;
+    lastTransferRequestRef.current = null;
     setConflicts([]);
     pendingPasteTargetRef.current = null;
     conflictDecisionsRef.current = {};
@@ -977,7 +1102,7 @@ export default function App() {
     if (cancelledId) {
       handleTaskCompletedOrCancelled(cancelledId, true);
     } else {
-      setTransfer((p) => ({ ...p, isActive: false, progress: 0 }));
+      setTransfer((p) => ({ ...p, isActive: false, isPaused: false, progress: 0, error: null }));
       if (typeof window !== 'undefined') {
         sessionStorage.removeItem('cp_active_transfer');
         sessionStorage.removeItem('cp_active_tasks');
@@ -1030,6 +1155,8 @@ export default function App() {
               onCancel={handleCancelTransfer} 
               onMinimize={handleMinimizeTransfer}
               onOpenDestination={(dest) => tauriApi.openDestinationFolder(dest)}
+              onRetry={lastTransferRequestRef.current ? handleRetryTransfer : undefined}
+              onDismissError={handleDismissError}
             />
           )
         ) : isLandingWindow ? (
@@ -1045,6 +1172,8 @@ export default function App() {
               onCancel={handleCancelTransfer} 
               onMinimize={handleMinimizeTransfer}
               onOpenDestination={(dest) => tauriApi.openDestinationFolder(dest)}
+              onRetry={lastTransferRequestRef.current ? handleRetryTransfer : undefined}
+              onDismissError={handleDismissError}
             />
           ) : activeTab === 'conflict' && conflicts.length > 0 ? (
             <ConflictView

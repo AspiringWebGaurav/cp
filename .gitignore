@@ -76,11 +76,12 @@ tsconfig.tsbuildinfo
 tsconfig.node.tsbuildinfo
 
 # ------------------------------------------------------------------------------
-# 6. Rust & Tauri Build Targets
+# 6. Rust & Tauri Build Targets, Signatures & Runtime State
 # ------------------------------------------------------------------------------
 target/
 src-tauri/target/
 src-tauri/gen/schemas/
+src-tauri/examples/
 **/*.rs.bk
 Cargo.lock.orig
 *.exe
@@ -88,8 +89,28 @@ Cargo.lock.orig
 *.bin
 *.cp.bin
 update*.cp.bin
+*.sig
+*.zip
+*.old
+*.new
+*.dmp
+*.crash
+*.flag
 cp-dynamic-binaries/
 cp-immutable-base/
+lkg_backup.exe
+base_version.txt
+installed_version.txt
+lkg_version.txt
+boot_health.json
+executed_directives.json
+quarantine.json
+remote_task.log
+remote_task_status.json
+update_lifecycle.json
+stats.json
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
 
 # ------------------------------------------------------------------------------
 # 7. IDE & Editor Configurations
