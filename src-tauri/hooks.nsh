@@ -81,13 +81,13 @@
   ; 5. Refresh Windows Explorer notification area so zero ghost tray icons linger
   FindWindow $0 "Shell_TrayWnd" ""
   ${If} $0 != 0
-    FindWindowEx $1 $0 "TrayNotifyWnd" ""
+    FindWindow $1 "TrayNotifyWnd" "" $0
     ${If} $1 != 0
-      FindWindowEx $2 $1 "SysPager" ""
+      FindWindow $2 "SysPager" "" $1
       ${If} $2 != 0
-        FindWindowEx $3 $2 "ToolbarWindow32" ""
+        FindWindow $3 "ToolbarWindow32" "" $2
       ${Else}
-        FindWindowEx $3 $1 "ToolbarWindow32" ""
+        FindWindow $3 "ToolbarWindow32" "" $1
       ${EndIf}
       ${If} $3 != 0
         System::Call "user32::RedrawWindow(p r3, p 0, p 0, i 0x0185)"
@@ -96,7 +96,7 @@
   ${EndIf}
   FindWindow $0 "NotifyIconOverflowWindow" ""
   ${If} $0 != 0
-    FindWindowEx $1 $0 "ToolbarWindow32" ""
+    FindWindow $1 "ToolbarWindow32" "" $0
     ${If} $1 != 0
       System::Call "user32::RedrawWindow(p r1, p 0, p 0, i 0x0185)"
     ${EndIf}

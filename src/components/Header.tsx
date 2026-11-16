@@ -1,5 +1,5 @@
+import { useState, useEffect, useRef } from 'react';
 import cpIcon from '../assets/cp-icon.png';
-import { RefreshCw } from 'lucide-react';
 
 interface HeaderProps {
   currentVersion?: string;
@@ -22,6 +22,110 @@ export function Header({
   updateProgressPct = 0,
   onCheckUpdate,
 }: HeaderProps) {
+  // Manual user click tracking to show "UP TO DATE" momentarily only on explicit user request (ScheduleMe parity)
+  const wasManualClickRef = useRef(false);
+  const [showResultStage, setShowResultStage] = useState(false);
+  const resultTimerRef = useRef<number | null>(null);
+
+  const handleButtonClick = () => {
+    wasManualClickRef.current = true;
+    onCheckUpdate?.();
+  };
+
+  const prevCheckingRef = useRef(isChecking);
+  useEffect(() => {
+    if (prevCheckingRef.current && !isChecking && !isUpdating && !hasUpdate) {
+      if (wasManualClickRef.current) {
+        setShowResultStage(true);
+        if (resultTimerRef.current !== null) {
+          window.clearTimeout(resultTimerRef.current);
+        }
+        resultTimerRef.current = window.setTimeout(() => {
+          setShowResultStage(false);
+          wasManualClickRef.current = false;
+          resultTimerRef.current = null;
+        }, 1800);
+      }
+    }
+    prevCheckingRef.current = isChecking;
+  }, [isChecking, isUpdating, hasUpdate]);
+
+  const isVerifying = updateStage === 'verifying';
+  const isInstalling =
+    updateStage === 'staging' || updateStage === 'ready' || updateStage === 'restarting';
+  const pct = Math.min(100, Math.max(8, Math.round(updateProgressPct || 0)));
+
+  // ScheduleMe Stage Text Machine (Pure Blended, NO (latest), NO Green Dot)
+  const otaStageText = (() => {
+    if (isChecking) {
+      return 'CHECKING';
+    }
+    if (showResultStage) {
+      return 'UP TO DATE';
+    }
+    return '';
+  })();
+
+  const otaStageTone = (() => {
+    if (isChecking) {
+      return 'text-zinc-600 font-semibold animate-pulse';
+    }
+    return 'text-zinc-700 font-semibold';
+  })();
+
+  const stagePhaseKey = otaStageText ? (isChecking ? 'checking' : 'up_to_date') : '';
+
+  const [displayedStage, setDisplayedStage] = useState(otaStageText);
+  const [displayedTone, setDisplayedTone] = useState(otaStageTone);
+  const [displayedPhaseKey, setDisplayedPhaseKey] = useState(stagePhaseKey);
+  const [stageVisible, setStageVisible] = useState(Boolean(otaStageText));
+  const hideTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (hideTimerRef.current !== null) {
+      window.clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+
+    if (otaStageText) {
+      setDisplayedStage(otaStageText);
+      setDisplayedTone(otaStageTone);
+      setDisplayedPhaseKey(stagePhaseKey);
+      let raf2 = 0;
+      const raf1 = window.requestAnimationFrame(() => {
+        raf2 = window.requestAnimationFrame(() => {
+          setStageVisible(true);
+        });
+      });
+      return () => {
+        window.cancelAnimationFrame(raf1);
+        window.cancelAnimationFrame(raf2);
+      };
+    }
+
+    setStageVisible(false);
+    hideTimerRef.current = window.setTimeout(() => {
+      setDisplayedStage('');
+      setDisplayedPhaseKey('');
+      hideTimerRef.current = null;
+    }, 520);
+
+    return () => {
+      if (hideTimerRef.current !== null) {
+        window.clearTimeout(hideTimerRef.current);
+        hideTimerRef.current = null;
+      }
+    };
+  }, [otaStageText, otaStageTone, stagePhaseKey]);
+
+  const rowWashClass = !otaStageText
+    ? 'opacity-0'
+    : isChecking
+    ? 'opacity-100 bg-zinc-200/40'
+    : 'opacity-100 bg-zinc-100/60';
+
+  const showShimmer = isChecking && stageVisible;
+
   return (
     <div className="flex items-center justify-between pb-2 mb-1.5 border-b border-zinc-200/75 px-0.5 select-none shrink-0">
       {/* Left Lockup: Brand & Identity */}
@@ -32,9 +136,9 @@ export function Header({
         title="CP by Gaurav Patil • cp.apps.gauravpatil.site"
         className="flex items-center gap-2.5 cursor-pointer group"
       >
-        <img 
-          src={cpIcon} 
-          alt="CP Logo" 
+        <img
+          src={cpIcon}
+          alt="CP Logo"
           className="w-8 h-8 rounded-lg shadow-2xs ring-1 ring-zinc-900/5 shrink-0 object-contain transform-gpu transition-transform group-hover:scale-105 duration-200"
         />
         <div className="flex flex-col justify-center select-none text-left">
@@ -47,64 +151,89 @@ export function Header({
         </div>
       </a>
 
-      {/* Right Lockup: Symmetrical Status Capsule */}
-      <div className="flex items-center">
+      {/* Right Lockup: ScheduleMe Borderless Blended Dynamic Version UI (Pure v0.0.5, No Dot, No Latest) */}
+      <div className="flex items-center" data-testid="header-version-lockup">
         {isUpdating || hasUpdate ? (
           <div
             title={`Automated background update to v${targetVersion?.replace(/^v/, '') || ''} • ${Math.round(updateProgressPct || 0)}%`}
-            className="relative inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50/90 border border-emerald-300/90 text-emerald-900 text-[11px] font-mono shadow-2xs select-none overflow-hidden min-w-[134px] transform-gpu transition-all"
+            className="group relative overflow-hidden inline-flex items-center gap-1.5 px-1.5 py-1 rounded-md text-zinc-600 text-[11px] font-mono font-medium leading-none select-none transition-colors duration-200"
           >
-            {/* Integrated Fill Progress Bar */}
+            {/* Hairline Bottom Progress Bar (Neutral Zinc Track & Fill, Zero Green) */}
             <div
-              className="absolute inset-y-0 left-0 bg-gradient-to-r from-emerald-200/80 via-emerald-300/85 to-emerald-400/90 transition-[width] duration-300 ease-out pointer-events-none"
-              style={{
-                width: `${
-                  updateStage === 'restarting' || updateStage === 'staging' || updateStage === 'ready'
-                    ? 100
-                    : updateStage === 'verifying'
-                    ? 100
-                    : Math.min(100, Math.max(8, updateProgressPct || 0))
-                }%`,
-              }}
-            />
+              aria-hidden="true"
+              className="absolute inset-x-1 bottom-0 h-[1.5px] pointer-events-none overflow-hidden rounded-full bg-zinc-200"
+            >
+              <div
+                className="h-full bg-zinc-600 transition-[width] duration-300 ease-out"
+                style={{ width: `${isInstalling || isVerifying ? 100 : pct}%` }}
+              />
+            </div>
 
-            {/* Foreground Content (always crisp, stable, and jitter-free) */}
-            <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-700 shrink-0 transform-gpu relative z-10" />
-            <span className="font-semibold text-emerald-950 relative z-10 tracking-tight whitespace-nowrap">
-              {updateStage === 'restarting'
-                ? 'Restarting...'
-                : updateStage === 'verifying'
-                ? 'Verifying...'
-                : updateStage === 'staging' || updateStage === 'ready'
-                ? 'Installing...'
-                : targetVersion
-                ? `Updating v${targetVersion.replace(/^v/, '')}${updateProgressPct > 0 ? ` ${Math.round(updateProgressPct)}%` : '...'}`
-                : 'Updating...'}
+            {/* Symmetrically Aligned Single-Line Lockup (Pure Monospace Symmetry, Zero Spinner, Zero Ellipsis) */}
+            <span className="relative z-10 inline-flex items-center leading-none whitespace-nowrap">
+              <span className="font-semibold text-zinc-700 tracking-wide uppercase">
+                {updateStage === 'restarting'
+                  ? 'RESTARTING'
+                  : updateStage === 'verifying'
+                  ? `VERIFYING V${targetVersion?.replace(/^v/i, '') || ''}`
+                  : isInstalling
+                  ? `INSTALLING V${targetVersion?.replace(/^v/i, '') || ''}`
+                  : targetVersion
+                  ? `UPDATING TO V${targetVersion.replace(/^v/i, '')}${updateProgressPct > 0 ? ` ${Math.round(updateProgressPct)}%` : ''}`
+                  : 'UPDATING'}
+              </span>
             </span>
-          </div>
-        ) : isChecking ? (
-          <div
-            title="Checking GPHost Cloudflare R2 for latest release..."
-            className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50/70 border border-emerald-200/90 text-emerald-800 text-[11px] font-mono shadow-2xs select-none transform-gpu"
-          >
-            <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-600 shrink-0 transform-gpu" />
-            <span className="font-medium">Checking...</span>
           </div>
         ) : (
           <button
-            onClick={onCheckUpdate}
-            title="GPHost release verified • Click to re-check"
-            className="group inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-50 hover:bg-zinc-100/90 border border-zinc-200/90 hover:border-zinc-300 text-zinc-700 hover:text-zinc-900 transition-all duration-200 cursor-pointer shadow-2xs transform-gpu hover:shadow-xs active:scale-[0.98]"
+            data-testid="header-version-btn"
+            type="button"
+            onClick={handleButtonClick}
+            disabled={isChecking}
+            title={
+              isChecking
+                ? 'Checking GPHost Cloudflare R2 for latest release...'
+                : 'GPHost release verified • Click to re-check'
+            }
+            className="group relative overflow-hidden inline-flex items-center px-1.5 py-1 rounded-md text-zinc-500 hover:text-zinc-900 hover:bg-zinc-100/70 transition-colors duration-200 cursor-pointer select-none font-mono text-[11px] font-medium leading-none"
           >
-            <span className="relative flex h-2 w-2 shrink-0">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 transform-gpu" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-            </span>
-            <span className="text-[11px] font-mono font-semibold text-zinc-800">
-              v{currentVersion}
-            </span>
-            <span className="text-[9.5px] font-semibold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded-full border border-emerald-200/70 tracking-wide">
-              (latest)
+            {/* Ambient Dynamic Background Wash */}
+            <div
+              aria-hidden="true"
+              className={`absolute inset-0 pointer-events-none rounded-md transition-opacity duration-500 ease-out ${rowWashClass}`}
+            />
+
+            {/* Shimmer Sweep Effect (Active during checking) */}
+            {showShimmer && (
+              <div
+                aria-hidden="true"
+                className="absolute inset-0 pointer-events-none overflow-hidden rounded-md"
+              >
+                <div className="h-full w-2/3 animate-shimmer-sweep bg-gradient-to-r from-transparent via-zinc-900/[0.08] to-transparent" />
+              </div>
+            )}
+
+            {/* Symmetrically Aligned Single-Line Lockup (Pure Single Baseline, Zero Bottom Inclination) */}
+            <span className="relative z-10 inline-flex items-center leading-none whitespace-nowrap gap-1.5">
+              <span className="tracking-wide uppercase">
+                V{currentVersion?.replace(/^v/i, '')}
+              </span>
+
+              {/* Dynamic Stage Text (ScheduleMe in-place slide, fade, and expand on exact same line) */}
+              {displayedStage ? (
+                <span
+                  data-testid="header-version-stage"
+                  className={`inline-flex items-center leading-none overflow-hidden whitespace-nowrap text-[11px] tracking-wide transition-[opacity,max-width,color] duration-500 ease-out ${displayedTone} ${
+                    stageVisible
+                      ? 'opacity-100 max-w-[120px]'
+                      : 'opacity-0 max-w-0'
+                  }`}
+                >
+                  <span key={displayedPhaseKey} className="inline-block animate-fade-in font-semibold">
+                    {displayedStage}
+                  </span>
+                </span>
+              ) : null}
             </span>
           </button>
         )}

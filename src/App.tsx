@@ -9,6 +9,21 @@ import { type UpdateUIState, type UpdateTriggerReason } from './components/Updat
 import { tauriApi } from './services/tauriApi';
 import type { SystemInfo, ClipboardFileInfo, TransferState, ProgressUpdate, ReleaseManifest, UpdateDownloadProgress, ConflictAction, FileConflictInfo, TransferErrorEvent } from './types';
 
+function isNewerVersion(remote: string, current: string): boolean {
+  const parse = (v: string): number[] =>
+    v.replace(/^v+/, '').split('.').map((s) => parseInt(s, 10) || 0);
+  const r = parse(remote);
+  const c = parse(current);
+  const maxLen = Math.max(r.length, c.length);
+  for (let i = 0; i < maxLen; i++) {
+    const rv = r[i] || 0;
+    const cv = c[i] || 0;
+    if (rv > cv) return true;
+    if (rv < cv) return false;
+  }
+  return false;
+}
+
 export default function App() {
   const [currentVersion, setCurrentVersion] = useState<string>(() => {
     if (typeof window !== 'undefined') {
@@ -250,8 +265,8 @@ export default function App() {
     }
 
     const now = Date.now();
-    // 2. Anti-spam debounce: prevent rapid accidental double-clicks within 500ms
-    if (now - lastUpdateCheckTime.current < 500) {
+    // 2. Anti-spam debounce: prevent rapid accidental double-clicks within 500ms (unless force=true)
+    if (!_force && now - lastUpdateCheckTime.current < 500) {
       return;
     }
 
@@ -290,7 +305,13 @@ export default function App() {
 
       if (checkEpochRef.current !== epoch) return;
 
-      if (manifest && manifest.version) {
+      const cleanVer = (ver || currentVersion).replace(/^v+/, '');
+      const remoteVer = manifest?.version?.replace(/^v+/, '');
+
+      // Robust Guard: Update is ONLY triggered if remote version is strictly newer semver than current
+      const hasNewer = Boolean(remoteVer && remoteVer !== cleanVer && isNewerVersion(remoteVer, cleanVer));
+
+      if (manifest && manifest.version && hasNewer) {
         updateManifestRef.current = manifest;
         updateStateRef.current = 'downloading';
         updateReasonRef.current = reason;
@@ -304,7 +325,7 @@ export default function App() {
           handleStartUpdate(manifest);
         }
       } else {
-        // No latest version on GPHost: show current version and that's it!
+        // Current version is already up to date (or remote is older/same): show current version and settle!
         updateManifestRef.current = null;
         updateStateRef.current = 'ready';
         setUpdateManifest(null);
@@ -338,8 +359,13 @@ export default function App() {
 
     // Initial hardware probe on mount
     refreshTelemetry();
+    let mountCheckTimer: any = null;
     if (activeTabRef.current === 'status') {
       tauriApi.setUiMode('landing').catch(() => {});
+      // Robust Landing Boot: Ensure update check triggers reliably whenever landing console mounts
+      mountCheckTimer = setTimeout(() => {
+        checkForUpdates('landing', true);
+      }, 150);
     } else if (activeTabRef.current === 'transfer') {
       tauriApi.setUiMode('transfer').catch(() => {});
     }
@@ -352,10 +378,17 @@ export default function App() {
       }
     }, 4000);
 
-    // Periodic silent background update check every 5 minutes (no spinner)
+    // Periodic update check: every 60s when console is visible on screen, every 5m when quiet in tray
     const bgUpdateInterval = setInterval(() => {
-      checkForUpdates('startup', false);
-    }, 300000);
+      if (document.visibilityState === 'visible' && activeTabRef.current === 'status') {
+        const now = Date.now();
+        if (now - lastUpdateCheckTime.current > 45000) {
+          checkForUpdates('landing', true);
+        }
+      } else {
+        checkForUpdates('startup', false);
+      }
+    }, 60000);
 
     // Enterprise Automated Lifecycle & Clipboard State Restoration
     tauriApi.restoreLifecycleState()
@@ -462,19 +495,28 @@ export default function App() {
       }).then((u) => { unlistenTriggerCheck = u; }).catch(() => {});
     }
 
-    // Refresh local telemetry only on window focus (NO remote GPHost requests!)
+    // Refresh local telemetry & check updates on window focus (throttled to 30s)
     const handleWindowFocus = () => {
       if (activeTabRef.current === 'status') {
         refreshTelemetry();
+        const now = Date.now();
+        if (now - lastUpdateCheckTime.current > 30000) {
+          checkForUpdates('landing', false);
+        }
       }
     };
     window.addEventListener('focus', handleWindowFocus);
 
-    // Dynamic power & working set memory optimization on visibility changes
+    // Dynamic power, working set memory optimization & update verification on visibility changes
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         if (activeTabRef.current === 'status') {
           refreshTelemetry();
+          // Regularly check for updates when landing page is un-hidden / revealed (throttled to 15s)
+          const now = Date.now();
+          if (now - lastUpdateCheckTime.current > 15000) {
+            checkForUpdates('landing', true);
+          }
         }
       } else {
         // Window hidden in tray: trim process memory footprint immediately
@@ -690,6 +732,7 @@ export default function App() {
     window.addEventListener('contextmenu', handleContextMenu);
 
     return () => {
+      if (mountCheckTimer) clearTimeout(mountCheckTimer);
       clearInterval(interval);
       clearInterval(bgUpdateInterval);
       window.removeEventListener('focus', handleWindowFocus);

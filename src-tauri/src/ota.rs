@@ -7,22 +7,22 @@ pub const GPHOST_API_BASE: &str = "https://gphost.eu.cc";
 pub const GPHOST_APP_SLUG: &str = "cp";
 
 pub fn resolve_current_version() -> String {
-    // In dev / debug mode, always trust embedded CARGO_PKG_VERSION
-    if cfg!(debug_assertions) || std::env::var("TAURI_ENV_DEBUG").is_ok() {
-        return env!("CARGO_PKG_VERSION").trim_start_matches('v').to_string();
-    }
+    let pkg_clean = env!("CARGO_PKG_VERSION").trim_start_matches('v').to_string();
 
+    // 1. Authoritative check: Read dynamic installed_version.txt in %LOCALAPPDATA%\CP
+    // (Preserves parity with Downex / GPN dynamic OTA swap architecture)
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         let cp_dir = std::path::PathBuf::from(local_app_data).join("CP");
         let ver_file = cp_dir.join("installed_version.txt");
         if let Ok(ver) = std::fs::read_to_string(&ver_file) {
             let trimmed = ver.trim().trim_start_matches('v');
-            if !trimmed.is_empty() {
+            if !trimmed.is_empty() && (is_newer_version(trimmed, &pkg_clean) || trimmed == pkg_clean) {
                 return trimmed.to_string();
             }
         }
     }
-    env!("CARGO_PKG_VERSION").trim_start_matches('v').to_string()
+
+    pkg_clean
 }
 
 pub fn set_persisted_version(version: &str) {
@@ -404,6 +404,13 @@ async fn check_latest_release_inner(current_version: &str) -> Result<Option<Rele
                 }
 
                 if manifest.url.is_some() {
+                    let clean_cur = current_version.trim().trim_start_matches('v');
+                    // Anti-loop Circuit Breaker: If current version is ALREADY identical to remote version,
+                    // never emit an update manifest. The host device is already running this release!
+                    if ver_trimmed == clean_cur {
+                        return Ok(None);
+                    }
+
                     // Anti-loop protection: if this version was quarantined after failed attempts, ignore it
                     if is_version_quarantined(ver_trimmed) {
                         return Ok(None);

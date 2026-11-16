@@ -1423,7 +1423,7 @@ pub fn run() {
                         restore_and_focus_window(&main_win);
                     }
                     // Do NOT emit "show-console" — keeps Landing UI completely separate!
-                } else if is_one_time_first_install || is_explicit_show || is_update_restart {
+                } else if cfg!(debug_assertions) || is_one_time_first_install || is_explicit_show || is_update_restart {
                     // Mark flag so that when React finishes mounting and painting the DOM,
                     // notify_app_ready instantly reveals the window with ZERO blank/white flash!
                     SHOULD_SHOW_ON_READY.store(true, std::sync::atomic::Ordering::SeqCst);
