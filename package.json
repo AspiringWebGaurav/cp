@@ -13,7 +13,7 @@
     "dev:frontend": "vite",
     "kill:dev": "node scripts/predev.mjs",
     "dev:engine": "tauri dev",
-    "build": "tauri build",
+    "build": "tauri build && node scripts/upload-base.mjs --local-only",
     "build:frontend": "tsc && vite build",
     "preview": "vite preview",
     "test": "cargo check --manifest-path src-tauri/Cargo.toml",

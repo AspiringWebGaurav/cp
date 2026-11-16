@@ -100,7 +100,7 @@ VIAddVersionKey "FileDescription" "CP (Copy/Paste Engine) — High-Performance W
 VIAddVersionKey "LegalCopyright" "${COPYRIGHT}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
-VIAddVersionKey "OriginalFilename" "CP-Setup.exe"
+VIAddVersionKey "OriginalFilename" "cpsetup.exe"
 VIAddVersionKey "Comments" "Free and open-source software by Gaurav Patil. Visit https://cp.apps.gauravpatil.site and https://gauravpatil.site"
 
 # additional plugins
