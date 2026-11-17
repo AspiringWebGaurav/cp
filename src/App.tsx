@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom';
 import { listen } from '@tauri-apps/api/event';
 import { Header } from './components/Header';
 import { StatusGrid } from './components/StatusGrid';
+import { SettingsUninstallView } from './components/SettingsUninstallView';
 import { TransferView } from './components/TransferView';
 import { ConflictView } from './components/ConflictView';
 import { type UpdateUIState, type UpdateTriggerReason } from './components/UpdateView';
@@ -116,7 +117,7 @@ export default function App() {
   // Strict Dual-Entity Persistence: Landing Console and Copy/Paste UI are independent entities.
   // When user is on TransferView, hard refresh strictly preserves TransferView with all transfer state.
   // When user is on Landing Console, hard refresh strictly preserves Landing Console.
-  const [activeTab, setActiveTab] = useState<'status' | 'transfer' | 'update' | 'conflict'>(() => {
+  const [activeTab, setActiveTab] = useState<'status' | 'transfer' | 'update' | 'conflict' | 'settings'>(() => {
     if (isTransferWindow) {
       return 'transfer';
     }
@@ -157,7 +158,7 @@ export default function App() {
   const checkEpochRef = useRef(0);
   const isPastingInProgressRef = useRef(false);
   const lastPasteTimeRef = useRef(0);
-  const activeTabRef = useRef<'status' | 'transfer' | 'update' | 'conflict'>(activeTab);
+  const activeTabRef = useRef<'status' | 'transfer' | 'update' | 'conflict' | 'settings'>(activeTab);
   const focusedTaskIdRef = useRef<string | null>(null);
   const hideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasTransferErrorRef = useRef(false);
@@ -1178,6 +1179,10 @@ export default function App() {
           userDismissedUpdate.current = false;
           checkForUpdates('manual', true);
         }}
+        isSettingsOpen={activeTab === 'settings'}
+        onToggleSettings={() => {
+          setActiveTab((prev) => (prev === 'settings' ? 'status' : 'settings'));
+        }}
       />
 
       {/* 2. Middle Content Area (Clean, cohesive structure without awkward voids) */}
@@ -1203,12 +1208,22 @@ export default function App() {
             />
           )
         ) : isLandingWindow ? (
-          <StatusGrid 
-            systemInfo={systemInfo} 
-          />
+          activeTab === 'settings' ? (
+            <SettingsUninstallView
+              onBack={() => setActiveTab('status')}
+            />
+          ) : (
+            <StatusGrid 
+              systemInfo={systemInfo} 
+            />
+          )
         ) : (
           /* Fallback for single-window / test environments */
-          activeTab === 'transfer' ? (
+          activeTab === 'settings' ? (
+            <SettingsUninstallView
+              onBack={() => setActiveTab('status')}
+            />
+          ) : activeTab === 'transfer' ? (
             <TransferView 
               transfer={transfer} 
               onTogglePause={handleTogglePause} 

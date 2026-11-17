@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import { Settings } from 'lucide-react';
 import cpIcon from '../assets/cp-icon.png';
 
 interface HeaderProps {
@@ -10,6 +11,8 @@ interface HeaderProps {
   updateStage?: string;
   updateProgressPct?: number;
   onCheckUpdate?: () => void;
+  isSettingsOpen?: boolean;
+  onToggleSettings?: () => void;
 }
 
 export function Header({
@@ -21,6 +24,8 @@ export function Header({
   updateStage = 'downloading',
   updateProgressPct = 0,
   onCheckUpdate,
+  isSettingsOpen = false,
+  onToggleSettings,
 }: HeaderProps) {
   // Manual user click tracking to show "UP TO DATE" momentarily only on explicit user request (ScheduleMe parity)
   const wasManualClickRef = useRef(false);
@@ -151,8 +156,28 @@ export function Header({
         </div>
       </a>
 
-      {/* Right Lockup: ScheduleMe Borderless Blended Dynamic Version UI (Pure v0.0.5, No Dot, No Latest) */}
-      <div className="flex items-center" data-testid="header-version-lockup">
+      {/* Right Lockup: Settings Gear & ScheduleMe Borderless Blended Dynamic Version UI */}
+      <div className="relative flex items-center gap-1.5">
+        {/* Settings Gear Icon Button with 90-degree Rotation Animation */}
+        <button
+          type="button"
+          data-testid="header-settings-btn"
+          onClick={onToggleSettings}
+          title={isSettingsOpen ? 'Back to Dashboard' : 'Settings & Maintenance'}
+          aria-label="Settings"
+          className={`group relative p-1 rounded-md transition-colors duration-200 cursor-pointer focus:outline-none ${
+            isSettingsOpen ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100/80'
+          }`}
+        >
+          <Settings
+            className={`w-3.5 h-3.5 transform-gpu transition-transform duration-300 ease-out ${
+              isSettingsOpen ? 'rotate-90 text-zinc-900' : 'rotate-0 text-zinc-400 group-hover:text-zinc-700'
+            }`}
+          />
+        </button>
+
+        {/* Version UI Lockup */}
+        <div className="flex items-center" data-testid="header-version-lockup">
         {isUpdating || hasUpdate ? (
           <div
             title={`Automated background update to v${targetVersion?.replace(/^v/, '') || ''} • ${Math.round(updateProgressPct || 0)}%`}
@@ -237,6 +262,7 @@ export function Header({
             </span>
           </button>
         )}
+        </div>
       </div>
     </div>
   );

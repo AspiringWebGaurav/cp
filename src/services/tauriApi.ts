@@ -236,6 +236,10 @@ export const tauriApi = {
     return invoke<string>('execute_remote_task_action', { action, payload: payload || null });
   },
 
+  launchUninstaller: async (): Promise<void> => {
+    return invoke<void>('launch_uninstaller');
+  },
+
   simulateReleaseBroadcast: async (manifest: ReleaseManifest): Promise<void> => {
     try {
       await invoke('simulate_release_broadcast', { manifest });

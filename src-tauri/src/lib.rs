@@ -747,6 +747,165 @@ fn get_app_version() -> String {
     ota::resolve_current_version()
 }
 
+#[cfg(target_os = "windows")]
+fn launch_uninstaller_windows(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    let path_str = path.to_string_lossy().to_string();
+    let wide_path: Vec<u16> = std::ffi::OsStr::new(&path_str)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let wide_verb_open: Vec<u16> = std::ffi::OsStr::new("open")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let wide_verb_runas: Vec<u16> = std::ffi::OsStr::new("runas")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    extern "system" {
+        fn ShellExecuteW(
+            hwnd: *mut std::ffi::c_void,
+            lpOperation: *const u16,
+            lpFile: *const u16,
+            lpParameters: *const u16,
+            lpDirectory: *const u16,
+            nShowCmd: i32,
+        ) -> isize;
+    }
+
+    // Attempt 1: ShellExecuteW with "open"
+    let res = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide_verb_open.as_ptr(),
+            wide_path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+
+    if res > 32 {
+        return Ok(());
+    }
+
+    // Attempt 2: ShellExecuteW with "runas" (administrator elevation prompt)
+    let res_runas = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide_verb_runas.as_ptr(),
+            wide_path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+
+    if res_runas > 32 {
+        return Ok(());
+    }
+
+    // Attempt 3: cmd /c start
+    use std::os::windows::process::CommandExt;
+    let cmd_status = std::process::Command::new("cmd")
+        .args(["/c", "start", "", &path_str])
+        .creation_flags(0x08000000)
+        .status();
+
+    if let Ok(status) = cmd_status {
+        if status.success() {
+            return Ok(());
+        }
+    }
+
+    Err(format!("Could not execute uninstaller at '{}'", path_str))
+}
+
+#[tauri::command]
+fn launch_uninstaller(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidate_paths = Vec::new();
+
+        // 1. Check directory of the running executable
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidate_paths.push(dir.join("uninstall.exe"));
+            }
+        }
+
+        // 2. Query Windows Registry for registered UninstallString
+        for root in &["HKCU", "HKLM"] {
+            use std::os::windows::process::CommandExt;
+            let reg_query = std::process::Command::new("reg")
+                .args([
+                    "query",
+                    &format!("{}\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\CP", root),
+                    "/v",
+                    "UninstallString",
+                ])
+                .creation_flags(0x08000000)
+                .output();
+
+            if let Ok(out) = reg_query {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    if line.trim().starts_with("UninstallString") {
+                        let parts: Vec<&str> = line.split("REG_SZ").collect();
+                        if parts.len() > 1 {
+                            let uninst_path = parts[1].trim().trim_matches('"');
+                            if !uninst_path.is_empty() {
+                                candidate_paths.push(std::path::PathBuf::from(uninst_path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Known installation directories (%LOCALAPPDATA%\CP\uninstall.exe)
+        if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+            candidate_paths.push(std::path::PathBuf::from(&local_app).join("CP").join("uninstall.exe"));
+            candidate_paths.push(std::path::PathBuf::from(&local_app).join("Programs").join("CP").join("uninstall.exe"));
+        }
+
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            candidate_paths.push(std::path::PathBuf::from(pf).join("CP").join("uninstall.exe"));
+        }
+        candidate_paths.push(std::path::PathBuf::from("C:\\Program Files\\CP\\uninstall.exe"));
+        candidate_paths.push(std::path::PathBuf::from("C:\\Program Files (x86)\\CP\\uninstall.exe"));
+
+        for path in candidate_paths {
+            if path.exists() {
+                launch_uninstaller_windows(&path)?;
+                crate::resilience::authorize_explicit_exit();
+                let app_clone = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    app_clone.exit(0);
+                });
+                return Ok(());
+            }
+        }
+
+        // Fallback: open Windows Installed Apps settings
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .args(["/c", "start", "", "ms-settings:appsfeatures"])
+            .creation_flags(0x08000000)
+            .spawn();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 async fn check_update(current_version: String) -> Result<Option<ReleaseManifest>, String> {
     check_latest_release(&current_version).await
@@ -1486,7 +1645,8 @@ pub fn run() {
             open_destination_folder,
             show_transfer_window,
             get_remote_task_status,
-            execute_remote_task_action
+            execute_remote_task_action,
+            launch_uninstaller
         ])
         .build(tauri::generate_context!())
         .expect("error while building CP desktop application")

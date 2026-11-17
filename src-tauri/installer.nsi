@@ -19,6 +19,46 @@ ManifestDPIAwareness PerMonitorV2
 !addplugindir "{{signed_plugins_path}}"
 {{/if}}
 
+!define INSTALLERICON "{{installer_icon}}"
+!define SIDEBARIMAGE "{{sidebar_image}}"
+!define HEADERIMAGE "{{header_image}}"
+!define UNINSTALLERICON "{{uninstaller_icon}}"
+!define UNINSTALLERHEADERIMAGE "{{uninstaller_header_image}}"
+
+; Installer & Uninstaller Icons (Must be set BEFORE MUI2.nsh and before any Page command)
+!if "${INSTALLERICON}" != ""
+  Icon "${INSTALLERICON}"
+  !define MUI_ICON "${INSTALLERICON}"
+!endif
+
+!if "${UNINSTALLERICON}" != ""
+  UninstallIcon "${UNINSTALLERICON}"
+  !define MUI_UNICON "${UNINSTALLERICON}"
+!else if "${INSTALLERICON}" != ""
+  UninstallIcon "${INSTALLERICON}"
+  !define MUI_UNICON "${INSTALLERICON}"
+!endif
+
+; Installer sidebar image
+!if "${SIDEBARIMAGE}" != ""
+  !define MUI_WELCOMEFINISHPAGE_BITMAP "${SIDEBARIMAGE}"
+!endif
+
+; Enable header images for installer and uninstaller pages when either image is configured.
+!if "${HEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE
+  !define MUI_HEADERIMAGE_BITMAP "${HEADERIMAGE}"
+!else if "${UNINSTALLERHEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE
+!endif
+
+; Uninstaller header image
+!if "${UNINSTALLERHEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE_UNBITMAP "${UNINSTALLERHEADERIMAGE}"
+!else if "${HEADERIMAGE}" != ""
+  !define MUI_HEADERIMAGE_UNBITMAP "${HEADERIMAGE}"
+!endif
+
 !include MUI2.nsh
 !include FileFunc.nsh
 !include x64.nsh
@@ -45,11 +85,6 @@ ${StrLoc}
 !define HOMEPAGE "{{homepage}}"
 !define INSTALLMODE "{{install_mode}}"
 !define LICENSE "{{license}}"
-!define INSTALLERICON "{{installer_icon}}"
-!define SIDEBARIMAGE "{{sidebar_image}}"
-!define HEADERIMAGE "{{header_image}}"
-!define UNINSTALLERICON "{{uninstaller_icon}}"
-!define UNINSTALLERHEADERIMAGE "{{uninstaller_header_image}}"
 !define MAINBINARYNAME "{{main_binary_name}}"
 !define MAINBINARYSRCPATH "{{main_binary_path}}"
 !define BUNDLEID "{{bundle_id}}"
@@ -135,40 +170,6 @@ VIAddVersionKey "Comments" "Free and open-source software by Gaurav Patil. Visit
   !define MULTIUSER_INSTALLMODE_FUNCTION RestorePreviousInstallLocation
   !define MULTIUSER_EXECUTIONLEVEL Highest
   !include MultiUser.nsh
-!endif
-
-; Installer icon
-!if "${INSTALLERICON}" != ""
-  !define MUI_ICON "${INSTALLERICON}"
-!endif
-
-; Installer sidebar image
-!if "${SIDEBARIMAGE}" != ""
-  !define MUI_WELCOMEFINISHPAGE_BITMAP "${SIDEBARIMAGE}"
-!endif
-
-; Enable header images for installer and uninstaller pages when either image is configured.
-!if "${HEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE
-!else if "${UNINSTALLERHEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE
-!endif
-
-; Installer header image
-!if "${HEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE_BITMAP "${HEADERIMAGE}"
-!endif
-
-; Uninstaller header image
-!if "${UNINSTALLERHEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE_UNBITMAP "${UNINSTALLERHEADERIMAGE}"
-!else if "${HEADERIMAGE}" != ""
-  !define MUI_HEADERIMAGE_UNBITMAP "${HEADERIMAGE}"
-!endif
-
-; Uninstaller icon
-!if "${UNINSTALLERICON}" != ""
-  !define MUI_UNICON "${UNINSTALLERICON}"
 !endif
 
 ; Define registry key to store installer language
@@ -1054,6 +1055,11 @@ Section Uninstall
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\CP"
+  ${EndIf}
+
+  ; Launch official uninstalled page in default browser
+  ${If} $UpdateMode <> 1
+    ExecShell "open" "https://cp.apps.gauravpatil.site/uninstalled"
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
