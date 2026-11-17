@@ -98,6 +98,7 @@ update*.cp.bin
 *.flag
 cp-dynamic-binaries/
 cp-immutable-base/
+all-base-app/
 lkg_backup.exe
 base_version.txt
 installed_version.txt
