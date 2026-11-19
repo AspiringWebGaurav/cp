@@ -874,7 +874,7 @@ Function un.CheckRunningProcess
   ; 1. Fast check if CP window is open (pure Win32, zero child processes)
   FindWindow $0 "CP_WINDOW_CLASS" ""
   ${If} $0 != 0
-    Goto prompt_user
+    Goto kill_process
   ${EndIf}
 
   ; 2. Pure Win32 file lock check - zero child processes, zero cmd.exe
@@ -883,7 +883,7 @@ Function un.CheckRunningProcess
     FileOpen $0 "$INSTDIR\${MAINBINARYNAME}.exe" "a"
     ${If} ${Errors}
       ; File is locked by Windows kernel -> CP is currently running!
-      Goto prompt_user
+      Goto kill_process
     ${Else}
       FileClose $0
     ${EndIf}
@@ -891,11 +891,6 @@ Function un.CheckRunningProcess
 
   ; CP process is not running - proceed cleanly with zero prompts
   Return
-
-  prompt_user:
-    MessageBox MB_YESNO|MB_ICONQUESTION \
-      "CP Engine is currently running in the background.$\r$\n$\r$\nWould you like to close CP Engine now to continue uninstalling?" \
-      IDYES kill_process IDNO cancel_uninstall
 
   kill_process:
     ; 1. Request clean polite shutdown via CP_WINDOW_CLASS WM_CLOSE
@@ -918,10 +913,6 @@ Function un.CheckRunningProcess
     nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM CP.exe /T'
     Sleep 300
     Return
-
-  cancel_uninstall:
-    MessageBox MB_OK|MB_ICONINFORMATION "Uninstallation cancelled. Please close CP Engine before running the uninstaller."
-    Abort
 FunctionEnd
 
 Function un.onInit
@@ -1055,11 +1046,6 @@ Section Uninstall
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\CP"
-  ${EndIf}
-
-  ; Launch official uninstalled page in default browser
-  ${If} $UpdateMode <> 1
-    ExecShell "open" "https://cp.apps.gauravpatil.site/uninstalled"
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
