@@ -1021,6 +1021,12 @@ Section Uninstall
     DeleteRegKey HKCU "${UNINSTKEY}"
   !endif
 
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\CP"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\CP"
+  DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.cp.engine"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\com.cp.engine"
+  DeleteRegKey HKCU "Software\CP"
+
   ; Removes the Autostart entry for ${PRODUCTNAME} from the HKCU Run key if it exists.
   ; This ensures the program does not launch automatically after uninstallation if it exists.
   ; If it doesn't exist, it does nothing.
@@ -1051,6 +1057,12 @@ Section Uninstall
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL
     !insertmacro NSIS_HOOK_POSTUNINSTALL
   !endif
+
+  ; Launch uninstallation confirmation page on successful interactive removal
+  ${If} $UpdateMode <> 1
+  ${AndIf} $PassiveMode <> 1
+    ExecShell "open" "https://cp.apps.gauravpatil.site/uninstalled"
+  ${EndIf}
 
   ; Always auto-close uninstaller upon completion (frictionless zero-click finish, never stuck on Next/Finish/Close)
   SetAutoClose true

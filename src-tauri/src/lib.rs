@@ -640,11 +640,52 @@ fn hide_window(app: tauri::AppHandle) {
     use tauri::Manager;
     if let Some(win) = app.get_webview_window("transfer") {
         let _ = win.hide();
-    } else if let Some(win) = app.get_webview_window("main") {
+    }
+    if let Some(win) = app.get_webview_window("main") {
         let _ = win.hide();
     }
     power::trim_working_set_memory();
     refresh_tray_menu(&app);
+}
+
+#[tauri::command]
+fn is_main_window_visible(app: tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn is_transfer_running() -> bool {
+    crate::engine::is_transfer_running() || crate::engine::count_active_tasks() > 0
+}
+
+#[tauri::command]
+fn check_any_staged_update() -> Option<ota::StagedUpdateInfo> {
+    ota::check_any_staged_update_helper()
+}
+
+#[tauri::command]
+fn save_pending_paste(target: engine::ClipboardFileInfo) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let backup = crate::engine::ClipboardBackup {
+        file_paths: target.file_paths,
+        is_cut: target.is_cut,
+        text: None,
+        active_explorer_path: target.active_explorer_path,
+        timestamp: now,
+    };
+    crate::engine::persist_clipboard_backup(&backup);
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let cp_dir = std::path::PathBuf::from(local_app_data).join("CP");
+        let _ = std::fs::create_dir_all(&cp_dir);
+        let _ = std::fs::write(cp_dir.join("pending_paste.flag"), b"1");
+    }
 }
 
 #[tauri::command]
@@ -1015,6 +1056,28 @@ fn write_update_staging_file(file_name: String, bytes: Vec<u8>) -> Result<String
     }
 }
 
+#[tauri::command]
+fn check_staged_update(target_version: String) -> Option<String> {
+    ota::get_staged_update_path(&target_version).map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn stage_update_in_background(
+    app: tauri::AppHandle,
+    url: String,
+    target_version: String,
+    signature: Option<String>,
+) -> Result<String, String> {
+    let staged = ota::download_verify_and_stage_update(
+        &app,
+        &url,
+        signature.as_deref(),
+        &target_version,
+    )
+    .await?;
+    Ok(staged.to_string_lossy().to_string())
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RestoredLifecycleResponse {
     pub was_updated: bool,
@@ -1027,8 +1090,15 @@ pub struct RestoredLifecycleResponse {
     pub is_base_reset: bool,
 }
 
+static RESTORED_LIFECYCLE_CACHE: std::sync::Mutex<Option<RestoredLifecycleResponse>> = std::sync::Mutex::new(None);
+
 #[tauri::command]
 fn restore_lifecycle_state() -> RestoredLifecycleResponse {
+    let mut cache = RESTORED_LIFECYCLE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *cache {
+        return cached.clone();
+    }
+
     let current_ver = ota::resolve_current_version();
     let lifecycle_opt = ota::load_lifecycle_state();
     let restored_clip = engine::load_and_restore_saved_clipboard();
@@ -1065,7 +1135,7 @@ fn restore_lifecycle_state() -> RestoredLifecycleResponse {
         has_pending_paste = true;
     }
 
-    RestoredLifecycleResponse {
+    let res = RestoredLifecycleResponse {
         was_updated,
         previous_version: prev_ver,
         current_version: current_ver,
@@ -1073,7 +1143,9 @@ fn restore_lifecycle_state() -> RestoredLifecycleResponse {
         has_pending_paste,
         clipboard_files: restored_clip,
         is_base_reset,
-    }
+    };
+    *cache = Some(res.clone());
+    res
 }
 
 #[tauri::command]
@@ -1525,12 +1597,11 @@ pub fn run() {
                     a == "--autostart" || a == "--background" || a == "--silent" || a == "-b" || a == "--minimized"
                 });
 
-                // One-time first-install trigger:
-                // Triggers if "--first-install" or "--first-run" is passed,
-                // OR if the .first_run_completed flag does not exist in %LOCALAPPDATA%\CP
-                // STRICT RULE: Autostart/background boots NEVER trigger first-install window presentation!
-                let is_first_install_flag = !is_autostart && args.iter().any(|a| a == "--first-install" || a == "--first-run");
-                let is_one_time_first_install = if is_autostart {
+                let is_explicit_show = args.iter().any(|a| a == "--show" || a == "--landing");
+                let is_update_restart = !is_autostart && args.iter().any(|a| a == "--restarted" || a == "--update-restart");
+
+                let is_first_install_flag = !is_autostart && !is_update_restart && args.iter().any(|a| a == "--first-install" || a == "--first-run");
+                let is_one_time_first_install = if is_autostart || is_update_restart {
                     false
                 } else {
                     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
@@ -1548,14 +1619,11 @@ pub fn run() {
                     }
                 };
 
-                let is_explicit_show = args.iter().any(|a| a == "--show" || a == "--landing");
-                let is_update_restart = !is_autostart && args.iter().any(|a| a == "--restarted" || a == "--update-restart");
-
                 // Silent Tray & Dual Entity Architecture:
                 // In background autostart: Keep windows strictly hidden and mount in system tray!
                 // Window opens strictly on explicit user action (e.g. clicking the tray icon),
                 // or just one time on first-install / after-install setup,
-                // or when an automated update restart finishes and reopens the appropriate entity.
+                // or when an explicit show was requested.
                 if is_autostart {
                     // Headless & Silent Autostart Standby Mode:
                     // 1. Both windows remain strictly hidden (visible: false in tauri.conf.json)
@@ -1582,7 +1650,7 @@ pub fn run() {
                         restore_and_focus_window(&main_win);
                     }
                     // Do NOT emit "show-console" — keeps Landing UI completely separate!
-                } else if cfg!(debug_assertions) || is_one_time_first_install || is_explicit_show || is_update_restart {
+                } else if is_one_time_first_install || is_explicit_show {
                     // Mark flag so that when React finishes mounting and painting the DOM,
                     // notify_app_ready instantly reveals the window with ZERO blank/white flash!
                     SHOULD_SHOW_ON_READY.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1631,6 +1699,8 @@ pub fn run() {
             download_update_container,
             verify_update_signature,
             write_update_staging_file,
+            check_staged_update,
+            stage_update_in_background,
             apply_in_process_update,
             restore_lifecycle_state,
             get_update_lifecycle_state,
@@ -1646,7 +1716,11 @@ pub fn run() {
             show_transfer_window,
             get_remote_task_status,
             execute_remote_task_action,
-            launch_uninstaller
+            launch_uninstaller,
+            is_main_window_visible,
+            check_any_staged_update,
+            save_pending_paste,
+            is_transfer_running
         ])
         .build(tauri::generate_context!())
         .expect("error while building CP desktop application")

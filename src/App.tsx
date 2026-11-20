@@ -314,16 +314,43 @@ export default function App() {
 
       if (manifest && manifest.version && hasNewer) {
         updateManifestRef.current = manifest;
-        updateStateRef.current = 'downloading';
-        updateReasonRef.current = reason;
-        setUpdateManifest(manifest);
-        setUpdateReason(reason);
-        setUpdateState('downloading');
 
-        // Enterprise Automated Lifecycle: Automatically initiate update in the background.
-        // Progress is displayed exclusively inside the Header version pill without interrupting the Landing UI.
-        if (!isUpdatingInProgress.current) {
-          handleStartUpdate(manifest);
+        // If triggered by Landing UI or manual check (user is opening/viewing the UI)
+        if (reason === 'landing' || reason === 'manual') {
+          // CRITICAL GUARD: If ANY file transfer is actively in progress, DO NOT apply or restart!
+          const isBusy = transfer.isActive || activeTasks.some((t) => t.isActive);
+          const isEngineBusy = await tauriApi.isTransferRunning().catch(() => false);
+          if (isBusy || isEngineBusy) {
+            console.log('[CP Update] File transfer actively in progress. Update safely deferred.');
+            setUpdateManifest(manifest);
+            setUpdateReason(reason);
+            setUpdateState('ready');
+            return;
+          }
+
+          setUpdateManifest(manifest);
+          setUpdateReason(reason);
+
+          // Evaluate if staged binary is already ready on disk
+          const staged = await tauriApi.checkStagedUpdate(manifest.version);
+          if (staged) {
+            setUpdateState('restarting');
+            try {
+              await tauriApi.applyInProcessUpdate(staged, manifest.version, 'status', false);
+              return;
+            } catch (e) {
+              console.warn('[CP] Staged update apply error, fallback to full update:', e);
+            }
+          }
+
+          // Not yet staged: initiate download & staging in UI
+          setUpdateState('downloading');
+          if (!isUpdatingInProgress.current) {
+            handleStartUpdate(manifest);
+          }
+        } else {
+          // In background / tray: quiet staging only, NEVER activate, install or restart!
+          tauriApi.stageUpdateInBackground(manifest).catch(() => {});
         }
       } else {
         // Current version is already up to date (or remote is older/same): show current version and settle!
@@ -363,9 +390,14 @@ export default function App() {
     let mountCheckTimer: any = null;
     if (activeTabRef.current === 'status') {
       tauriApi.setUiMode('landing').catch(() => {});
-      // Robust Landing Boot: Ensure update check triggers reliably whenever landing console mounts
-      mountCheckTimer = setTimeout(() => {
-        checkForUpdates('landing', true);
+      // Robust Landing Boot: Ensure update check triggers reliably whenever landing console mounts and is visible
+      mountCheckTimer = setTimeout(async () => {
+        const isVisible = await tauriApi.isMainWindowVisible().catch(() => false);
+        if (isVisible) {
+          checkForUpdates('landing', true);
+        } else {
+          checkForUpdates('startup', false);
+        }
       }, 150);
     } else if (activeTabRef.current === 'transfer') {
       tauriApi.setUiMode('transfer').catch(() => {});
@@ -373,15 +405,17 @@ export default function App() {
 
     // Polling interval for live hardware & transfer telemetry (4 seconds, ONLY when console window is actively visible)
     // When hidden in system tray: zero polling, zero wakeups, near-zero CPU and battery consumption
-    const interval = setInterval(() => {
-      if (document.visibilityState === 'visible' && activeTabRef.current === 'status') {
+    const interval = setInterval(async () => {
+      const isVisible = await tauriApi.isMainWindowVisible().catch(() => false);
+      if (isVisible && activeTabRef.current === 'status') {
         refreshTelemetry();
       }
     }, 4000);
 
-    // Periodic update check: every 60s when console is visible on screen, every 5m when quiet in tray
-    const bgUpdateInterval = setInterval(() => {
-      if (document.visibilityState === 'visible' && activeTabRef.current === 'status') {
+    // Periodic update check: every 60s when console is visible on screen, quiet staging when quiet in tray
+    const bgUpdateInterval = setInterval(async () => {
+      const isVisible = await tauriApi.isMainWindowVisible().catch(() => false);
+      if (isVisible && activeTabRef.current === 'status') {
         const now = Date.now();
         if (now - lastUpdateCheckTime.current > 45000) {
           checkForUpdates('landing', true);
@@ -409,15 +443,18 @@ export default function App() {
             sessionStorage.removeItem('cp_focused_task_id');
             setActiveTasks([]);
 
-            if (lifecycle.has_pending_paste && !isLandingWindow) {
-              const clip = lifecycle.clipboard_files || (await tauriApi.getClipboardFiles().catch(() => null));
-              if (clip && clip.filePaths && clip.filePaths.length > 0) {
-                setClipboardFiles(clip);
-                handlePasteWithCP(clip, true);
-              } else if (!isTransferWindow) {
-                setActiveTab('status');
-                tauriApi.setUiMode('landing').catch(() => {});
+            if (lifecycle.has_pending_paste) {
+              if (!isLandingWindow) {
+                const clip = lifecycle.clipboard_files || (await tauriApi.getClipboardFiles().catch(() => null));
+                if (clip && clip.filePaths && clip.filePaths.length > 0) {
+                  setClipboardFiles(clip);
+                  flushSync(() => {
+                    setActiveTab('transfer');
+                  });
+                  handlePasteWithCP(clip, true);
+                }
               }
+              // If isLandingWindow, remain completely silent so transfer window executes cleanly
             } else if (!isTransferWindow && (lifecycle.restored_tab === 'status' || activeTabRef.current === 'status')) {
               setActiveTab('status');
               tauriApi.setUiMode('landing').catch(() => {});
@@ -509,8 +546,9 @@ export default function App() {
     window.addEventListener('focus', handleWindowFocus);
 
     // Dynamic power, working set memory optimization & update verification on visibility changes
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+    const handleVisibilityChange = async () => {
+      const isVisible = await tauriApi.isMainWindowVisible().catch(() => false);
+      if (isVisible) {
         if (activeTabRef.current === 'status') {
           refreshTelemetry();
           // Regularly check for updates when landing page is un-hidden / revealed (throttled to 15s)
@@ -671,30 +709,31 @@ export default function App() {
     let unlistenUpdateProgress: (() => void) | undefined;
     listen<UpdateDownloadProgress>('update-download-progress', (event) => {
       const data = event.payload;
-      setUpdateProgress(data);
-      if (data.stage === 'downloading') {
-        setUpdateState('downloading');
-      } else if (data.stage === 'verifying') {
-        setUpdateState('verifying');
-      } else if (data.stage === 'ready') {
-        setUpdateState('ready');
+      // Only reflect download progress in UI if window is actively visible
+      if (document.visibilityState === 'visible' && activeTabRef.current === 'status') {
+        setUpdateProgress(data);
+        if (data.stage === 'downloading') {
+          setUpdateState('downloading');
+        } else if (data.stage === 'verifying') {
+          setUpdateState('verifying');
+        } else if (data.stage === 'ready') {
+          setUpdateState('ready');
+        }
       }
     }).then((u) => { unlistenUpdateProgress = u; }).catch(() => {});
 
     // Listen to real-time server push release broadcast from Rust (SSE stream)
     let unlistenReleaseBroadcast: (() => void) | undefined;
-    listen<ReleaseManifest>('ota-release-broadcast', (event) => {
+    listen<ReleaseManifest>('ota-release-broadcast', async (event) => {
       const manifest = event.payload;
       if (manifest && manifest.version) {
         updateManifestRef.current = manifest;
-        updateStateRef.current = 'downloading';
-        updateReasonRef.current = 'push_broadcast';
-        setUpdateManifest(manifest);
-        setUpdateReason('push_broadcast');
-        setUpdateState('downloading');
-
-        if (!isUpdatingInProgress.current) {
-          handleStartUpdate(manifest);
+        // In background: Rust already stages the update binary silently to disk.
+        // DO NOT install, DO NOT restart, DO NOT show surprise UI while in tray.
+        const isVisible = await tauriApi.isMainWindowVisible().catch(() => false);
+        if (isVisible && activeTabRef.current === 'status') {
+          setUpdateManifest(manifest);
+          setUpdateReason('push_broadcast');
         }
       }
     }).then((u) => { unlistenReleaseBroadcast = u; }).catch(() => {});
@@ -789,11 +828,13 @@ export default function App() {
         if (isCancel) {
           clearHideTimeout();
           tauriApi.hideWindow().catch(() => {});
+          tauriApi.trimMemory().catch(() => {});
           refreshTelemetry();
         } else {
           clearHideTimeout();
           hideTimeoutRef.current = setTimeout(async () => {
             await tauriApi.hideWindow().catch(() => {});
+            await tauriApi.trimMemory().catch(() => {});
             setTransfer((p) => ({ ...p, progress: 0 }));
             refreshTelemetry();
             hideTimeoutRef.current = null;
@@ -810,7 +851,7 @@ export default function App() {
   const startActualTransfer = async (
     target: ClipboardFileInfo,
     conflictDecisions: Record<string, ConflictAction>,
-    skipUpdateCheck = false,
+    _skipUpdateCheck = false,
     startIndex = 0
   ) => {
     // Transactional State Reset: Ensure clean slate for transfer execution
@@ -842,10 +883,6 @@ export default function App() {
     const firstFileName = firstSrc.split(/[/\\]/).pop() || target.primaryName;
     const taskId = 'task-' + Date.now();
 
-    const isAlreadyUpdating = isUpdatingInProgress.current;
-    const knownUpdate = updateManifestRef.current;
-    const hasKnownUpdate = Boolean(knownUpdate && updateStateRef.current !== 'ready');
-
     const initialTransfer: TransferState = {
       taskId,
       isActive: true,
@@ -855,10 +892,10 @@ export default function App() {
       destination: destDir,
       currentFile: target.filePaths.length > 1 ? `(${firstIdx + 1}/${target.filePaths.length}) ${firstFileName}` : firstFileName,
       progress: 0,
-      speed: hasKnownUpdate ? 'Holding for update...' : 'Starting...',
+      speed: 'Starting...',
       bytesTransferred: '0 B',
       totalBytes: target.formattedSize,
-      eta: hasKnownUpdate ? `Updating to v${knownUpdate?.version}...` : 'Calculating...',
+      eta: 'Calculating...',
       error: null,
     };
 
@@ -877,57 +914,9 @@ export default function App() {
       await tauriApi.showTransferWindow().catch(() => {});
     });
 
-    // Case 1: If an update is ALREADY actively downloading or staged, hold and restart with pasted file
-    if (hasKnownUpdate && knownUpdate) {
-      updateReasonRef.current = 'copy';
-      setUpdateReason('copy');
-      setTransfer((prev) => ({
-        ...prev,
-        speed: 'Holding for update...',
-        eta: `Updating to v${knownUpdate.version}...`,
-      }));
-      handleStartUpdate(knownUpdate);
-      isPastingInProgressRef.current = false;
-      return;
-    }
-
-    // Case 2: Normal paste — START IMMEDIATELY without holding!
-    if (!skipUpdateCheck && !isAlreadyUpdating) {
-      (async () => {
-        try {
-          const liveVer = await tauriApi.getAppVersion().catch(() => currentVersion);
-          const manifest = await tauriApi.checkUpdate(liveVer).catch(() => null);
-          if (manifest && manifest.version) {
-            updateManifestRef.current = manifest;
-            updateStateRef.current = 'available';
-            updateReasonRef.current = 'copy';
-            setUpdateManifest(manifest);
-            setUpdateReason('copy');
-            setUpdateState('available');
-
-            tauriApi.cancelTransfer(taskId).catch(() => {});
-
-            setTransfer((prev) => {
-              if (prev.taskId === taskId && prev.isActive) {
-                return {
-                  ...prev,
-                  speed: 'Holding for update...',
-                  eta: `Updating to v${manifest.version}...`,
-                  isPaused: false,
-                };
-              }
-              return prev;
-            });
-
-            handleStartUpdate(manifest);
-          }
-        } catch (_) {}
-      })();
-    }
-
     try {
       for (let i = startIndex; i < target.filePaths.length; i++) {
-        if (isUpdatingInProgress.current || updateReasonRef.current === 'copy') {
+        if (isUpdatingInProgress.current) {
           break;
         }
 
@@ -969,7 +958,7 @@ export default function App() {
         }
       }
 
-      if (!isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
+      if (!isUpdatingInProgress.current) {
         lastTransferRequestRef.current = null;
         handleTaskCompletedOrCancelled(taskId);
       }
@@ -980,10 +969,10 @@ export default function App() {
           : err?.message || String(err || 'Unexpected transfer error');
       const isCancelled = errorMessage.toLowerCase().includes('cancel');
       if (isCancelled) {
-        if (!isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
+        if (!isUpdatingInProgress.current) {
           handleTaskCompletedOrCancelled(taskId, true);
         }
-      } else if (!isUpdatingInProgress.current && updateReasonRef.current !== 'copy') {
+      } else if (!isUpdatingInProgress.current) {
         console.error('Transfer failed:', errorMessage);
         clearHideTimeout();
         hasTransferErrorRef.current = true;
@@ -1087,6 +1076,108 @@ export default function App() {
     }
 
     const destDir = target.activeExplorerPath || 'C:\\';
+
+    // Pre-Paste Update Verification Pipeline:
+    // When user copy/pastes and no transfer operations are actively running:
+    // Check if an update is available or staged.
+    // If yes: open UI holding state, save pending paste, apply update, and restart into updated version!
+    if (!skipUpdateCheck && !isUpdatingInProgress.current) {
+      const isBusy = transfer.isActive || activeTasks.some((t) => t.isActive);
+      const isEngineBusy = await tauriApi.isTransferRunning().catch(() => false);
+
+      if (!isBusy && !isEngineBusy) {
+        try {
+          const liveVer = await tauriApi.getAppVersion().catch(() => currentVersion);
+
+          // 1. Check if an update binary is already staged on disk
+          let staged = await tauriApi.checkAnyStagedUpdate().catch(() => null);
+          let targetManifest: ReleaseManifest | null = null;
+
+          // 2. If not staged yet, check GPHost with a 1.5-second timeout
+          if (!staged) {
+            const manifestPromise = tauriApi.checkUpdate(liveVer);
+            const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500));
+            targetManifest = await Promise.race([manifestPromise, timeoutPromise]);
+          }
+
+          const hasNewer = staged
+            ? isNewerVersion(staged.version, liveVer)
+            : Boolean(targetManifest?.version && isNewerVersion(targetManifest.version, liveVer));
+
+          if (hasNewer) {
+            const newerVer = staged?.version || targetManifest?.version || 'new';
+
+            // OPEN UI IMMEDIATELY so user dynamically sees CP holding for update
+            flushSync(() => {
+              setActiveTab('transfer');
+              setTransfer({
+                taskId: 'update-restart',
+                isActive: true,
+                isPaused: false,
+                isCut: target.isCut,
+                source: target.filePaths[0] || '',
+                destination: destDir,
+                currentFile: target.primaryName,
+                progress: 35,
+                speed: 'HOLDING FOR UPDATE',
+                bytesTransferred: '',
+                totalBytes: target.formattedSize,
+                eta: `Updating to v${newerVer}...`,
+                error: null,
+              });
+            });
+            tauriApi.setUiMode('transfer').catch(() => {});
+            await tauriApi.showTransferWindow().catch(() => {});
+
+            // If not yet staged, download and stage it now
+            if (!staged && targetManifest) {
+              const stagedPath = await Promise.race([
+                tauriApi.stageUpdateInBackground(targetManifest),
+                new Promise<null>((resolve) => setTimeout(() => resolve(null), 4500)),
+              ]);
+              if (stagedPath) {
+                staged = { version: targetManifest.version, path: stagedPath };
+              }
+            }
+
+            if (staged && staged.path && staged.version) {
+              const finalStaged = staged;
+              isUpdatingInProgress.current = true;
+
+              // Comfortable visual pacing: advance progress bar and hold state
+              setTransfer((p) => ({
+                ...p,
+                progress: 68,
+                speed: 'HOLDING FOR UPDATE',
+                eta: `Applying v${finalStaged.version}...`,
+              }));
+              await new Promise((r) => setTimeout(r, 700));
+
+              // Save pending paste target explicitly in memory/disk
+              await tauriApi.savePendingPaste(target);
+
+              // Update card to indicate restart
+              setTransfer((p) => ({
+                ...p,
+                speed: 'RESTARTING ENGINE',
+                eta: `Launching v${finalStaged.version}...`,
+                progress: 100,
+              }));
+
+              // Comfortable visual pause (850ms) for clean and readable transition
+              await new Promise((r) => setTimeout(r, 850));
+
+              // In-process swap & detached restart with --auto-paste
+              await tauriApi.applyInProcessUpdate(finalStaged.path, finalStaged.version, 'transfer', true);
+              isPastingInProgressRef.current = false;
+              return;
+            }
+          }
+        } catch (updateErr) {
+          console.warn('[Pre-Paste Update Check] Proceeding with paste:', updateErr);
+        }
+      }
+    }
 
     // 1. Conflict Detection: check if any of the target files already exist in destination
     try {

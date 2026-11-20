@@ -1755,7 +1755,14 @@ pub fn restore_clipboard_native(_backup: &ClipboardBackup) -> Result<(), String>
     Ok(())
 }
 
+static RESTORED_CLIPBOARD_CACHE: std::sync::Mutex<Option<ClipboardFileInfo>> = std::sync::Mutex::new(None);
+
 pub fn load_and_restore_saved_clipboard() -> Option<ClipboardFileInfo> {
+    let mut cache = RESTORED_CLIPBOARD_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *cache {
+        return Some(cached.clone());
+    }
+
     let path = get_clipboard_backup_path()?;
     if !path.exists() {
         return None;
@@ -1798,6 +1805,7 @@ pub fn load_and_restore_saved_clipboard() -> Option<ClipboardFileInfo> {
         };
         // Clean up backup file now that it's restored
         let _ = std::fs::remove_file(path);
+        *cache = Some(info.clone());
         Some(info)
     } else {
         let _ = std::fs::remove_file(path);

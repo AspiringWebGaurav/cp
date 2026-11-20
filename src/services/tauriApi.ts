@@ -110,6 +110,43 @@ export const tauriApi = {
     return 'Update applied. Restarting...';
   },
 
+  checkStagedUpdate: async (targetVersion: string): Promise<string | null> => {
+    try {
+      return await invoke<string | null>('check_staged_update', { targetVersion });
+    } catch {
+      return null;
+    }
+  },
+
+  stageUpdateInBackground: async (manifest: ReleaseManifest): Promise<string | null> => {
+    let downloadUrl = manifest.url;
+    if (!downloadUrl) return null;
+    const cleanVer = manifest.version.replace(/^v+/, '');
+    try {
+      return await invoke<string>('stage_update_in_background', {
+        url: downloadUrl,
+        targetVersion: cleanVer,
+        signature: manifest.signature ?? null,
+      });
+    } catch {
+      return null;
+    }
+  },
+
+  applyInProcessUpdate: async (
+    stagingPath: string,
+    targetVersion: string,
+    activeTab?: string,
+    pendingPaste?: boolean
+  ): Promise<void> => {
+    await invoke('apply_in_process_update', {
+      stagingPath,
+      targetVersion: targetVersion.replace(/^v+/, ''),
+      activeTab: activeTab ?? 'status',
+      pendingPaste: pendingPaste ?? false,
+    });
+  },
+
   restoreLifecycleState: async (): Promise<RestoredLifecycle> => {
     return invoke<RestoredLifecycle>('restore_lifecycle_state');
   },
@@ -238,6 +275,24 @@ export const tauriApi = {
 
   launchUninstaller: async (): Promise<void> => {
     return invoke<void>('launch_uninstaller');
+  },
+
+  isMainWindowVisible: async (): Promise<boolean> => {
+    return invoke<boolean>('is_main_window_visible');
+  },
+
+  checkAnyStagedUpdate: async (): Promise<{ version: string; path: string } | null> => {
+    return invoke<{ version: string; path: string } | null>('check_any_staged_update');
+  },
+
+  savePendingPaste: async (target: ClipboardFileInfo): Promise<void> => {
+    try {
+      await invoke('save_pending_paste', { target });
+    } catch (_) {}
+  },
+
+  isTransferRunning: async (): Promise<boolean> => {
+    return invoke<boolean>('is_transfer_running');
   },
 
   simulateReleaseBroadcast: async (manifest: ReleaseManifest): Promise<void> => {

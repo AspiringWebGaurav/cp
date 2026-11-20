@@ -615,6 +615,11 @@ pub fn apply_update_and_restart(
     active_tab: Option<String>,
     pending_paste: bool,
 ) -> Result<(), String> {
+    // Ironclad Guard: NEVER allow application restart or exit while file transfers are active!
+    if crate::engine::is_transfer_running() || crate::engine::count_active_tasks() > 0 {
+        return Err("Cannot apply update: file transfer operations are currently in progress. Update safely deferred.".to_string());
+    }
+
     if !staged_path.exists() {
         return Err(format!("Staged binary does not exist at {:?}", staged_path));
     }
@@ -661,7 +666,7 @@ pub fn apply_update_and_restart(
         state: "RESTARTING".to_string(),
         target_version: target_version.clone(),
         previous_version: current_ver.clone(),
-        active_tab: active_tab.unwrap_or_else(|| "status".to_string()),
+        active_tab: active_tab.clone().unwrap_or_else(|| "status".to_string()),
         pending_paste,
         attempt_count: 1,
         timestamp: now_ts,
@@ -810,7 +815,13 @@ pub fn apply_update_and_restart(
         if pending_paste {
             cmd.arg("--auto-paste");
         } else {
-            cmd.arg("--show");
+            let is_main_visible = app
+                .get_webview_window("main")
+                .and_then(|w| w.is_visible().ok())
+                .unwrap_or(false);
+            if active_tab.as_deref() == Some("status") && is_main_visible {
+                cmd.arg("--show");
+            }
         }
         cmd.current_dir(&parent_dir);
         cmd.stdin(std::process::Stdio::null());
@@ -1039,6 +1050,54 @@ pub async fn download_verify_and_stage_update(
     );
 
     Ok(staged_path)
+}
+
+pub fn get_staged_update_path(target_version: &str) -> Option<PathBuf> {
+    let clean_ver = target_version.trim().trim_start_matches('v');
+    let temp_dir = std::env::temp_dir().join("com.cp.engine");
+    let staged_path = temp_dir.join(format!("cp-v{}.staged.exe", clean_ver));
+    if staged_path.exists() {
+        if let Ok(meta) = staged_path.metadata() {
+            if meta.len() >= 500_000 {
+                return Some(staged_path);
+            }
+        }
+    }
+    None
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct StagedUpdateInfo {
+    pub version: String,
+    pub path: String,
+}
+
+pub fn check_any_staged_update_helper() -> Option<StagedUpdateInfo> {
+    let current_ver = resolve_current_version();
+    let temp_dir = std::env::temp_dir().join("com.cp.engine");
+    if !temp_dir.exists() {
+        return None;
+    }
+    let entries = std::fs::read_dir(&temp_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            if file_name.starts_with("cp-v") && file_name.ends_with(".staged.exe") && file_name.len() > 15 {
+                let ver_part = &file_name[4..file_name.len() - 11];
+                if is_newer_version(ver_part, &current_ver) {
+                    if let Ok(meta) = path.metadata() {
+                        if meta.len() >= 500_000 {
+                            return Some(StagedUpdateInfo {
+                                version: ver_part.to_string(),
+                                path: path.to_string_lossy().to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Starts the persistent background SSE update stream listener.
